@@ -1,10 +1,10 @@
-# Downloads word photos from Wikimedia Commons into the repo, so the site
-# serves them itself (works offline and never breaks on a hotlink).
+# Скачивает фото слов с Wikimedia Commons прямо в репозиторий: сайт отдаёт их сам
+# и они работают без интернета. Чтобы добавить фото, допиши строку в tools/photos.txt.
 name: Fetch photos
 on:
   workflow_dispatch:
   push:
-    paths: ["tools/photo-candidates.txt", "tools/photos.txt"]
+    paths: ["tools/photos.txt"]
 permissions:
   contents: write
 jobs:
@@ -13,12 +13,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Download
-        run: |
-          if [ -f tools/photos.txt ]; then tools/fetch-photos.sh tools/photos.txt photos; fi
-          if [ -f tools/photo-candidates.txt ]; then tools/fetch-photos.sh tools/photo-candidates.txt photo-candidates; fi
+        run: tools/fetch-photos.sh tools/photos.txt photos
       - name: Commit
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          for d in photos photo-candidates; do [ -d "$d" ] && git add -A "$d"; done; true
+          git add -A photos
           git diff --cached --quiet || (git commit -m "Скачать фото слов" && git push)
