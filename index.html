@@ -4,7 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Калимат</title>
-<meta name="theme-color" content="#f1f1ee">
+<meta name="theme-color" content="#f1f1ee" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#151514" media="(prefers-color-scheme: dark)">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icons/icon-180.png">
@@ -16,15 +17,19 @@
   // Тема выставляется до отрисовки, чтобы не мигало.
   try { var t = localStorage.getItem("kalimat.theme"); if (t) document.documentElement.setAttribute("data-theme", t); } catch (e) {}
 </script>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Scheherazade+New:wght@400;700&family=Golos+Text:wght@400;500;600&family=Unbounded:wght@400;500&display=swap">
+<style>
+  /* Фон до загрузки style.css: без белой или чёрной вспышки на ярлыке iPhone. */
+  html { background: #f1f1ee; }
+  @media (prefers-color-scheme: dark) { html:not([data-theme="light"]) { background: #151514; } }
+  html[data-theme="dark"] { background: #151514; }
+</style>
+<link rel="preload" href="fonts/golos-text-cyrillic.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/scheherazade-new-400-arabic.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="fonts/fonts.css">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <main id="app"></main>
-<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <script src="firebase-config.js"></script>
 <script src="words.js"></script>
 <script src="app.js"></script>
