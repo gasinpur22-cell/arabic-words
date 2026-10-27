@@ -495,7 +495,6 @@
     const tasks = ids.map(id => {
       const st = me().words[id].stage;
       const types = st < 2 ? ["ar2ru", "ru2ar", "cloze", "flip"] : ["ru2ar", "cloze", "build", "type"];
-      if (arVoice && st < 2) types.push("listen");
       return { type: pick(types), id };
     });
     runSession({
@@ -523,7 +522,7 @@
   }
   function startTest(kind, n) {
     const ids = shuffle(testIds(kind, n));
-    const recog = ["ar2ru", "cloze"]; if (arVoice) recog.push("listen");
+    const recog = ["ar2ru", "cloze"];
     const prod = ["ru2ar", "build", "type"];
     const tasks = ids.map((id, i) => ({ type: pick(i % 3 === 2 ? recog : prod), id }));
     if (ids.length >= 4) tasks.push({ type: "match", ids: shuffle(ids).slice(0, 5) });
@@ -589,6 +588,10 @@
     show();
   }
 
+  // В заданиях вместо озвучки — фото слова (если есть), иначе эмодзи.
+  const pic = w => w.photo && w.photo.src
+    ? `<img src="${esc(w.photo.src)}" alt="" style="width:120px;height:120px;object-fit:cover;border-radius:14px;margin:0 auto 6px;display:block">`
+    : `<div style="font-size:2rem">${w.emoji || ""}</div>`;
   const ansAr = w => `<span class="ar">${w.ar}</span> — ${esc(w.ru)}`;
 
   function choice(box, prompt, options, correctId, isAr, onPick) {
@@ -605,21 +608,14 @@
     ar2ru(box, t, done) {
       const w = byId[t.id];
       const opts = shuffle([w, ...distractors(t.id)]);
-      choice(box, `<span class="label">Что значит слово?</span><div class="q"><div class="ar">${w.ar}</div>${speakBtn(w.ar)}</div>`, opts, w.id, false,
-        ok => { if (ok) speak(w.ar); done([{ id: w.id, ok }], ansAr(w)); });
+      choice(box, `<span class="label">Что значит слово?</span><div class="q"><div class="ar">${w.ar}</div></div>`, opts, w.id, false,
+        ok => { done([{ id: w.id, ok }], ansAr(w)); });
     },
     ru2ar(box, t, done) {
       const w = byId[t.id];
       const opts = shuffle([w, ...distractors(t.id)]);
-      choice(box, `<span class="label">Выбери арабское слово</span><div class="q"><div style="font-size:2rem">${w.emoji || ""}</div><div class="tr">${esc(w.ru)}</div></div>`, opts, w.id, true,
-        ok => { speak(w.ar); done([{ id: w.id, ok }], ansAr(w)); });
-    },
-    listen(box, t, done) {
-      const w = byId[t.id];
-      const opts = shuffle([w, ...distractors(t.id)]);
-      choice(box, `<span class="label">Послушай и выбери перевод</span><div class="q"><button class="btn soft" data-say="${esc(w.ar)}">🔊 Послушать ещё раз</button></div>`, opts, w.id, false,
-        ok => done([{ id: w.id, ok }], ansAr(w)));
-      setTimeout(() => speak(w.ar), 250);
+      choice(box, `<span class="label">Выбери арабское слово</span><div class="q">${pic(w)}<div class="tr">${esc(w.ru)}</div></div>`, opts, w.id, true,
+        ok => { done([{ id: w.id, ok }], ansAr(w)); });
     },
     cloze(box, t, done) {
       const w = byId[t.id];
@@ -633,7 +629,6 @@
       box.innerHTML = `<span class="label">Вспомни перевод, потом открой</span>
         <div class="flip" id="fl"><div class="q"><div class="ar">${w.ar}</div><p class="muted">Нажми, чтобы проверить</p></div></div>`;
       document.getElementById("fl").onclick = () => {
-        speak(w.ar);
         box.innerHTML = `<span class="label">Ты вспомнил?</span>
           <div class="q"><div class="ar">${w.ar}</div><div class="tr">${esc(w.ru)}</div></div>
           <div class="row"><button class="btn ghost" id="no">Не вспомнил</button><button class="btn" id="yes">Вспомнил</button></div>`;
@@ -648,7 +643,7 @@
       const tiles = shuffle(letters.concat(extra));
       let used = [];
       box.innerHTML = `<span class="label">Собери слово из букв</span>
-        <div class="q"><div style="font-size:2rem">${w.emoji || ""}</div><div class="tr">${esc(w.ru)}</div></div>
+        <div class="q">${pic(w)}<div class="tr">${esc(w.ru)}</div></div>
         <div class="built" id="built">&nbsp;</div>
         <div class="tiles">${tiles.map((l, k) => `<button class="tile" data-k="${k}">${l}</button>`).join("")}</div>
         <div class="row"><button class="btn ghost" id="bs">⌫ Стереть</button><button class="btn" id="chk">Проверить</button></div>`;
@@ -660,21 +655,20 @@
       on("chk", () => {
         const ok = norm(used.map(k => tiles[k]).join("")) === norm(w.ar);
         box.querySelectorAll("button").forEach(b => b.disabled = true);
-        speak(w.ar);
         done([{ id: w.id, ok }], ansAr(w));
       });
     },
     type(box, t, done) {
       const w = byId[t.id];
       box.innerHTML = `<span class="label">Напиши по-арабски</span>
-        <div class="q"><div style="font-size:2rem">${w.emoji || ""}</div><div class="tr">${esc(w.ru)}</div></div>
+        <div class="q">${pic(w)}<div class="tr">${esc(w.ru)}</div></div>
         <form id="tf" class="kv" style="gap:8px">
           <input id="tin" class="input-ar" lang="ar" dir="rtl" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="اُكْتُبْ هُنَا">
           <p class="muted small">Огласовки можно не ставить. Нужна арабская раскладка на телефоне.</p>
           <div class="row"><button class="btn ghost" type="button" id="idk">Не знаю</button><button class="btn" type="submit">Проверить</button></div>
         </form>`;
       const inp = document.getElementById("tin");
-      const finish = ok => { box.querySelectorAll("button, input").forEach(b => b.disabled = true); speak(w.ar); done([{ id: w.id, ok }], ansAr(w)); };
+      const finish = ok => { box.querySelectorAll("button, input").forEach(b => b.disabled = true); done([{ id: w.id, ok }], ansAr(w)); };
       document.getElementById("tf").onsubmit = e => { e.preventDefault(); if (inp.value.trim()) finish(norm(inp.value) === norm(w.ar)); };
       on("idk", () => finish(false));
       inp.focus();
@@ -688,7 +682,7 @@
         <div class="match"><div class="col">${left.map(w => `<button class="opt ar" data-l="${w.id}">${w.ar}</button>`).join("")}</div>
         <div class="col">${right.map(w => `<button class="opt" data-r="${w.id}">${esc(w.ru)}</button>`).join("")}</div></div>`;
       const L = [...box.querySelectorAll("[data-l]")], R = [...box.querySelectorAll("[data-r]")];
-      L.forEach(b => b.onclick = () => { L.forEach(x => x.classList.remove("sel")); b.classList.add("sel"); sel = b.dataset.l; speak(byId[sel].ar); });
+      L.forEach(b => b.onclick = () => { L.forEach(x => x.classList.remove("sel")); b.classList.add("sel"); sel = b.dataset.l; });
       R.forEach(b => b.onclick = () => {
         if (!sel) return;
         if (b.dataset.r === sel) {
