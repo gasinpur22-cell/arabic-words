@@ -150,6 +150,8 @@
   app.addEventListener("click", e => {
     const say = e.target.closest("[data-say]");
     if (say) { e.stopPropagation(); speak(say.dataset.say); return; }
+    const reveal = e.target.closest("[data-reveal]");
+    if (reveal) { reveal.closest(".wcard").classList.add("open"); reveal.setAttribute("aria-expanded", "true"); return; }
     const word = e.target.closest("[data-word]");
     if (word) showWord(word.dataset.word, currentBack);
   });
@@ -354,35 +356,53 @@
   }
 
   // ── Карточка слова ──
-  function cardHtml(w) {
-    return `<section class="panel">
-      <div class="card-hero">
-        <div class="emoji" aria-hidden="true">${w.emoji || ""}</div>
-        <div class="ar">${w.ar}</div>
+  // Закрытая карточка показывает только слово: сначала вспомни, потом тап раскрывает остальное.
+  function ayahHtml(q) {
+    const words = q.ar.split(" ");
+    const mark = (ws, at) => ws.map((x, i) => i === at ? `<mark>${x}</mark>` : x).join(" ");
+    const from = Math.max(0, q.hl - 3), to = Math.min(words.length, q.hl + 4);
+    const frag = (from > 0 ? "… " : "") + mark(words.slice(from, to), q.hl - from) + (to < words.length ? " …" : "");
+    return `<details class="ayah">
+      <summary><span class="ar">${frag}</span><span class="small muted">${esc(q.ref)} · весь аят</span></summary>
+      <p class="ar">${mark(words, q.hl)}</p><p>${esc(q.ru)}</p>
+    </details>`;
+  }
+  // Русский текст с арабскими вставками: каждую вставку изолируем, чтобы стрелки и тире не путали порядок.
+  const rich = t => esc(t).replace(/[\u0600-\u06FF](?:[\u0600-\u06FF\s–-]*[\u0600-\u06FF])?/g, m => `<bdi class="ar">${m}</bdi>`);
+  const pairs = list => list.map(p => `<div class="phr"><span class="ar">${p[0]}</span><span>${esc(p[1])}</span></div>`).join("");
+
+  function cardHtml(w, open) {
+    const quran = w.quran || [];
+    return `<section class="panel wcard${open ? " open" : ""}">
+      <button class="card-hero" data-reveal aria-expanded="${open ? "true" : "false"}">
+        <span class="ar">${w.ar}</span>
+        <span class="hint muted small">Вспомни перевод и нажми</span>
+      </button>
+      <div class="card-body">
+        ${w.photo ? `<figure class="photo"><img src="${w.photo.src}" alt="${esc(w.ru)}" loading="lazy"><figcaption>Фото: ${esc(w.photo.credit)}</figcaption></figure>` : ""}
         <div class="tr">${esc(w.ru)}</div>
-        ${speakBtn(w.ar)}
-      </div>
-      <div class="kv">
-        <span class="label">Корень</span>
-        <div class="roots">${w.root.map(l => `<span class="root-l">${l}</span>`).join("")}</div>
-        <p style="text-align:center">${esc(w.rootMeaning)}</p>
-      </div>
-      <div class="kv"><span class="label">Как запомнить</span><p>${esc(w.assoc)}</p></div>
-      <div class="kv"><span class="label">Словосочетания</span>
-        ${w.phrases.map(p => `<div class="phr"><span class="ar">${p[0]}</span><span>${esc(p[1])}</span></div>`).join("")}
-      </div>
-      <details>
-        <summary>Подробнее</summary>
-        <div class="kv" style="gap:12px">
-          <div class="kv"><span class="label">Как образовано</span><p>${esc(w.pattern)}</p></div>
-          ${w.plural ? `<div class="kv"><span class="label">Множественное число</span><p class="ar" style="font-size:1.4rem;text-align:right">${w.plural}</p></div>` : ""}
-          ${w.related && w.related.length ? `<div class="kv"><span class="label">Однокоренные слова</span>${w.related.map(p => `<div class="phr"><span class="ar">${p[0]}</span><span>${esc(p[1])}</span></div>`).join("")}</div>` : ""}
-          ${w.examples && w.examples.length ? `<div class="kv"><span class="label">Пример из жизни</span>${w.examples.map(p => `<div class="kv"><p class="ar" style="font-size:1.3rem">${p[0]}</p><p class="muted">${esc(p[1])}</p></div>`).join("")}</div>` : ""}
-          ${w.quran ? `<div class="kv"><span class="label">В Коране</span>
-            <div class="quran"><p class="ar">${w.quran.ar}</p><p>${esc(w.quran.ru)}</p><p class="small muted">${esc(w.quran.ref)}</p>
-            ${w.quran.note ? `<p class="small muted">${esc(w.quran.note)}</p>` : ""}</div></div>` : `<div class="kv"><span class="label">В Коране</span><p class="muted">Этого слова и его корня в таком значении в Коране нет.</p></div>`}
+        <div class="kv">
+          <span class="label">Корень</span>
+          <div class="roots">${w.root.map(l => `<span class="root-l">${l}</span>`).join("")}</div>
+          <p style="text-align:center">${esc(w.rootMeaning)}</p>
         </div>
-      </details>
+        <div class="kv"><span class="label">Как запомнить</span>${[].concat(w.assoc).map(a => `<p>${rich(a)}</p>`).join("")}</div>
+        <div class="kv"><span class="label">Словосочетания</span>${pairs(w.phrases)}</div>
+        <details>
+          <summary>Подробнее</summary>
+          <div class="kv" style="gap:16px">
+            <div class="kv"><span class="label">Как образовано</span><p>${rich(w.pattern)}</p></div>
+            ${w.plural ? `<div class="kv"><span class="label">Множественное число</span><p class="ar" style="font-size:1.4rem;text-align:right">${w.plural}</p></div>` : ""}
+            ${w.related && w.related.length ? `<div class="kv"><span class="label">Однокоренные слова</span>${pairs(w.related)}</div>` : ""}
+            ${w.examples && w.examples.length ? `<div class="kv"><span class="label">Примеры из жизни</span>${w.examples.map(p => `<div class="ex"><p class="ar">${p[0]}</p><p class="muted">${esc(p[1])}</p></div>`).join("")}</div>` : ""}
+            ${w.facts && w.facts.length ? `<div class="kv"><span class="label">Интересно</span><ul class="facts">${w.facts.map(f => `<li>${rich(f)}</li>`).join("")}</ul></div>` : ""}
+            <div class="kv"><span class="label">В Коране</span>
+              ${quran.map(ayahHtml).join("")}
+              ${w.qnote ? `<p class="small muted">${rich(w.qnote)}</p>` : ""}
+            </div>
+          </div>
+        </details>
+      </div>
     </section>`;
   }
 
@@ -406,7 +426,7 @@
     app.innerHTML = `<div class="wrap">
       <div class="top"><button class="chip" id="back">← Назад</button><span class="muted small">Неделя ${w0.week}, день ${w0.day}</span></div>
       <p class="muted">Прочитай карточки, послушай слова, потом закрепи коротким упражнением.</p>
-      ${ids.map(id => cardHtml(byId[id])).join("")}
+      ${ids.map(id => cardHtml(byId[id], !me().words[id])).join("")}
       <button class="btn block" id="drill">Закрепить (1 минута)</button>
       <button class="btn ghost block" id="mark">Отметить выученными без упражнения</button>
     </div>`;

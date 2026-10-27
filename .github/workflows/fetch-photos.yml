@@ -1,0 +1,22 @@
+# Скачивает фото слов с Wikimedia Commons прямо в репозиторий: сайт отдаёт их сам
+# и они работают без интернета. Чтобы добавить фото, допиши строку в tools/photos.txt.
+name: Fetch photos
+on:
+  workflow_dispatch:
+  push:
+    paths: ["tools/photos.txt"]
+permissions:
+  contents: write
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download
+        run: tools/fetch-photos.sh tools/photos.txt photos
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A photos
+          git diff --cached --quiet || (git commit -m "Скачать фото слов" && git push)

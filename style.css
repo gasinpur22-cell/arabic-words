@@ -103,11 +103,19 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 3px 
 .legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: .8rem; color: var(--muted); }
 .legend span { display: inline-flex; gap: 6px; align-items: center; }
 
-/* Word card */
-.card-hero { display: flex; flex-direction: column; align-items: center; gap: 4px; text-align: center; padding-block: 8px; }
-.card-hero .emoji { font-size: 2.6rem; line-height: 1; }
-.card-hero .ar { font-size: 3rem; line-height: 1.5; font-weight: 700; }
-.card-hero .tr { font-size: 1.15rem; font-weight: 600; }
+/* Word card: closed shows only the word; tapping reveals the body. */
+.card-hero {
+  display: flex; flex-direction: column; align-items: center; gap: 2px; width: 100%;
+  text-align: center; padding: 12px 8px; border: 0; background: none; color: inherit; font: inherit; cursor: pointer;
+}
+.card-hero .ar { font-family: var(--font-ar); font-size: 3rem; line-height: 1.5; font-weight: 700; }
+.wcard.open .card-hero { cursor: default; }
+.wcard.open .hint, .wcard:not(.open) .card-body { display: none; }
+.card-body { display: grid; gap: 14px; }
+.card-body > .tr { text-align: center; font-size: 1.3rem; font-weight: 600; }
+.photo { margin: 0; display: grid; gap: 4px; }
+.photo img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 12px; background: var(--line); display: block; }
+.photo figcaption { font-size: .7rem; color: var(--muted); text-align: right; }
 .roots { display: flex; gap: 6px; direction: rtl; justify-content: center; }
 .root-l { font-family: var(--font-ar); font-size: 1.4rem; width: 44px; height: 44px; display: grid; place-items: center; border-radius: 10px; background: var(--gold-soft); color: var(--gold); font-weight: 700; }
 .kv { display: grid; gap: 4px; }
@@ -118,8 +126,17 @@ button:focus-visible, input:focus-visible, summary:focus-visible { outline: 3px 
 details { border-top: 1px solid var(--line); padding-top: 8px; }
 summary { cursor: pointer; font-weight: 600; color: var(--accent); padding-block: 6px; }
 details[open] summary { margin-bottom: 8px; }
-.quran { background: var(--accent-soft); border-radius: 12px; padding: 12px; display: grid; gap: 6px; }
-.quran .ar { font-size: 1.35rem; line-height: 1.9; }
+.ex { display: grid; gap: 2px; }
+.ex .ar { font-size: 1.3rem; }
+.facts { margin: 0; padding-inline-start: 1.2em; display: grid; gap: 8px; }
+.ayah { background: var(--accent-soft); border-radius: 12px; padding: 10px 12px; border-top: 0; }
+.ayah summary { list-style: none; display: grid; gap: 4px; color: inherit; font-weight: 400; padding: 0; }
+.ayah summary::-webkit-details-marker { display: none; }
+.ayah[open] summary { margin-bottom: 8px; }
+.ayah[open] summary .ar { display: none; }
+.ayah .ar { font-size: 1.35rem; line-height: 2; }
+.ayah > p { margin: 0 0 6px; }
+.ayah mark { background: var(--gold-soft); color: var(--gold); border-radius: 4px; padding-inline: 2px; }
 .speak { border: 1px solid var(--line); background: var(--surface); color: var(--accent); border-radius: 999px; width: 40px; height: 40px; cursor: pointer; font-size: 1.1rem; }
 
 /* Exercises */
