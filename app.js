@@ -7,9 +7,18 @@
   const weeks = [...new Set(WORDS.map(w => w.week))].sort((a, b) => a - b);
 
   // Интервальные повторы: после изучения — через 2 дня, затем 5 (недельный зачёт),
-  // 14 дней, 30 дней, 90 дней. Ошибка возвращает слово на начало цикла.
+  // 14 дней, 30 дней (месячный зачёт), 90 дней (зачёт за 3 месяца), дальше раз в полгода.
+  // Ошибка откатывает слово на одну ступень назад, и оно приходит завтра.
   const INTERVALS = [2, 5, 14, 30, 90];
   const DONE = INTERVALS.length;
+  const REVIEW_LIMIT = 15;
+  // Зачёты: недельный, месячный (4 недели) и за 3 месяца (12 недель).
+  // stage — до какой ступени зачёт поднимает верно названное слово.
+  const TEST_KINDS = {
+    week: { weeks: 1, size: Infinity, stage: 2, name: n => "неделя " + n },
+    month: { weeks: 4, size: 20, stage: 3, name: n => "месяц " + n },
+    quarter: { weeks: 12, size: 24, stage: 4, name: n => "3 месяца, часть " + n }
+  };
   const KEY = "kalimat.v1";
   const app = document.getElementById("app");
 
@@ -73,28 +82,33 @@
   function learn(id, stage) {
     me().words[id] = { stage, due: today() + (stage === 0 ? INTERVALS[0] : 0), learned: today(), lapses: 0 };
   }
+  const gap = stage => stage >= DONE ? 180 : INTERVALS[stage];
   function grade(id, ok) {
     const s = me().words[id];
     if (!s) return learn(id, ok ? 1 : 0);
     if (ok) {
-      s.stage = Math.min(s.stage + 1, DONE);
-      s.due = today() + (s.stage >= DONE ? 180 : INTERVALS[s.stage]);
+      // После ошибки слово сначала закрепляется на той ступени, куда откатилось.
+      if (!s.lapse) s.stage = Math.min(s.stage + 1, DONE);
+      s.due = today() + gap(s.stage);
       s.lapse = false;
     } else {
-      s.stage = 0;
+      s.stage = Math.max(s.stage - 1, 0);
       s.due = today() + 1;
       s.lapses = (s.lapses || 0) + 1;
       s.lapse = true;
     }
   }
-  // Зачёт засчитывает недельный повтор: следующий — через 2 недели.
-  function gradeTest(id, ok) {
+  // Зачёт засчитывает повтор своей ступени. Пересдача не двигает слово вперёд раньше срока.
+  function gradeTest(id, ok, stage) {
     const s = me().words[id];
-    if (ok && (!s || s.stage < 2)) {
-      me().words[id] = Object.assign(s || { learned: today(), lapses: 0 }, { stage: 2, due: today() + INTERVALS[2], lapse: false });
-    } else grade(id, ok);
+    if (ok && (!s || s.stage < stage)) {
+      me().words[id] = Object.assign(s || { learned: today(), lapses: 0 }, { stage, due: today() + gap(stage), lapse: false });
+    } else if (!ok || s.due <= today()) grade(id, ok);
   }
-  const dueIds = () => WORDS.filter(w => { const s = me().words[w.id]; return s && s.due <= today(); }).map(w => w.id);
+  // Сначала забытые и самые просроченные.
+  const dueIds = () => WORDS.filter(w => { const s = me().words[w.id]; return s && s.due <= today(); })
+    .sort((a, b) => { const x = me().words[a.id], y = me().words[b.id]; return (y.lapse ? 1 : 0) - (x.lapse ? 1 : 0) || x.due - y.due; })
+    .map(w => w.id);
   function nextDue() {
     const ds = Object.values(me().words).map(s => s.due).filter(d => d > today());
     return ds.length ? Math.min(...ds) : null;
@@ -224,7 +238,7 @@
         <span class="label">Повторение на сегодня</span>
         ${due.length ? `
           <div class="bignum">${due.length}</div>
-          <p>${plural(due.length, "слово ждёт", "слова ждут", "слов ждут")} повторения. Это 2–3 минуты.</p>
+          <p>${plural(due.length, "слово ждёт", "слова ждут", "слов ждут")} повторения. ${due.length > REVIEW_LIMIT ? `За раз — ${REVIEW_LIMIT}, остальные завтра.` : "Это 2–3 минуты."}</p>
           <button class="btn block" id="review">Повторить</button>` : `
           <h2>Всё повторено</h2>
           <p>${nd ? "Следующий повтор: " + inDays(nd) + "." : "Отметь выученные слова, и они появятся здесь в нужный день."}</p>`}
@@ -239,6 +253,8 @@
           <h2>Новых слов пока нет</h2>
           <p class="muted">Когда пришлёшь новые 3 слова, они появятся здесь.</p>`}
       </section>
+
+      ${bigTestsPanel(tests)}
 
       ${weeks.slice().reverse().map(wk => weekPanel(wk, groups.filter(g => g.week === wk), tests)).join("")}
 
@@ -260,7 +276,7 @@
 
       <section class="panel">
         <span class="label">Мои результаты</span>
-        ${tests.length ? tests.slice().reverse().map(t => `<div class="hist"><span>Зачёт, неделя ${t.week} · ${fmtDay(t.date)}</span><strong>${t.correct}/${t.total} · ${pct(t.correct, t.total)}%</strong></div>`).join("") : `<p class="muted">Здесь появятся результаты зачётов.</p>`}
+        ${tests.length ? tests.slice().reverse().map(t => `<div class="hist"><span>Зачёт, ${esc(testName(t))} · ${fmtDay(t.date)}</span><strong>${t.correct}/${t.total} · ${pct(t.correct, t.total)}%</strong></div>`).join("") : `<p class="muted">Здесь появятся результаты зачётов.</p>`}
         ${CLOUD ? "" : `<div class="row"><button class="btn ghost" id="backup">Резервная копия</button></div>`}
       </section>
     </div>`;
@@ -270,7 +286,8 @@
     on("learn", e => learnDay(e.currentTarget.dataset.k));
     on("backup", backupModal);
     loadBoard();
-    app.querySelectorAll("[data-test]").forEach(b => b.onclick = () => startTest(+b.dataset.test));
+    app.querySelectorAll("[data-test]").forEach(b => b.onclick = () => startTest("week", +b.dataset.test));
+    app.querySelectorAll("[data-bigtest]").forEach(b => b.onclick = () => { const [k, n] = b.dataset.bigtest.split(":"); startTest(k, +n); });
     app.querySelectorAll("[data-markweek]").forEach(b => b.onclick = () => {
       WORDS.filter(w => w.week === +b.dataset.markweek && !me().words[w.id]).forEach(w => { learn(w.id, 1); me().words[w.id].due = today() + 1; });
       save(); home();
@@ -286,16 +303,51 @@
     return n + " " + f;
   }
 
+  // ── Зачёты: какие слова входят, лучший результат ──
+  const testKind = t => t.kind || "week";
+  const testNum = t => t.n || t.week;
+  const testName = t => TEST_KINDS[testKind(t)].name(testNum(t));
+  function testWeeks(kind, n) {
+    const k = TEST_KINDS[kind].weeks;
+    return Array.from({ length: k }, (_, i) => (n - 1) * k + i + 1);
+  }
+  function bestScore(tests, kind, n) {
+    return tests.filter(t => testKind(t) === kind && testNum(t) === n).reduce((b, t) => Math.max(b, pct(t.correct, t.total)), -1);
+  }
+  // Большой зачёт открывается, когда все его недели уже в словаре.
+  function bigTests() {
+    const last = weeks.length ? weeks[weeks.length - 1] : 0;
+    const list = [];
+    ["month", "quarter"].forEach(kind => {
+      for (let n = 1; n * TEST_KINDS[kind].weeks <= last; n++) list.push({ kind, n });
+    });
+    return list;
+  }
+  function bigTestsPanel(tests) {
+    const list = bigTests();
+    const lastWk = weeks.length ? weeks[weeks.length - 1] : 0;
+    const nextMonth = Math.ceil((lastWk + 1) / 4) * 4;
+    return `<section class="panel">
+      <span class="label">Большие зачёты</span>
+      ${list.length ? list.reverse().map(({ kind, n }) => {
+        const best = bestScore(tests, kind, n);
+        const ws = testWeeks(kind, n);
+        return `<div class="hist"><span>Зачёт, ${esc(TEST_KINDS[kind].name(n))} <span class="muted small">· недели ${ws[0]}–${ws[ws.length - 1]}${best >= 0 ? " · лучший " + best + "%" : ""}</span></span>
+          <button class="btn ${best >= 0 ? "ghost" : ""}" data-bigtest="${kind}:${n}">${best >= 0 ? "Пересдать" : "Сдать"}</button></div>`;
+      }).join("") : `<p class="muted small">Месячный зачёт по 4 неделям откроется после недели ${nextMonth}, зачёт за 3 месяца — после недели 12.</p>`}
+    </section>`;
+  }
+
   function weekPanel(wk, groups, tests) {
     const ids = groups.flatMap(g => g.ids);
     const learned = ids.filter(id => me().words[id]).length;
-    const best = tests.filter(t => t.week === wk).reduce((b, t) => Math.max(b, pct(t.correct, t.total)), -1);
+    const best = bestScore(tests, "week", wk);
     return `<section class="panel">
       <div class="top"><h2>Неделя ${wk}</h2><span class="muted small">${learned} из ${ids.length} начато${best >= 0 ? " · лучший зачёт " + best + "%" : ""}</span></div>
       <div>${groups.map(g => `<div class="day"><span class="day-n">День ${g.day}</span>
         <div class="day-words">${g.ids.map(id => `<button class="wchip" data-word="${id}"><i class="${dotClass(id)}"></i>${byId[id].ar}</button>`).join("")}</div></div>`).join("")}</div>
       <div class="row">
-        <button class="btn" data-test="${wk}">Зачёт недели ${wk}</button>
+        <button class="btn ${best >= 0 ? "ghost" : ""}" data-test="${wk}">${best >= 0 ? "Пересдать зачёт" : "Зачёт недели " + wk}</button>
         ${learned < ids.length ? `<button class="btn ghost" data-markweek="${wk}">Я уже знаю эти слова</button>` : ""}
       </div>
     </section>`;
@@ -376,11 +428,10 @@
 
   // ── Повторение ──
   function startReview() {
-    const ids = shuffle(dueIds()).slice(0, 20);
+    const ids = shuffle(dueIds().slice(0, REVIEW_LIMIT));
     const tasks = ids.map(id => {
       const st = me().words[id].stage;
       const types = st < 2 ? ["ar2ru", "ru2ar", "cloze", "flip"] : ["ru2ar", "cloze", "build", "type"];
-      if (arVoice && st < 2) types.push("listen");
       return { type: pick(types), id };
     });
     runSession({
@@ -389,32 +440,45 @@
         const agg = aggregate(res);
         Object.entries(agg).forEach(([id, ok]) => grade(id, ok));
         save();
-        resultScreen({ title: "Повторение готово", res, note: "Слова с ошибками вернутся завтра." });
+        const left = dueIds().length;
+        resultScreen({ title: "Повторение готово", res, note: "Слова с ошибками вернутся завтра." + (left ? " Ещё " + plural(left, "слово ждёт", "слова ждут", "слов ждут") + " — можно завтра." : "") });
       }
     });
   }
 
   // ── Зачёт ──
-  function startTest(wk) {
-    const ids = WORDS.filter(w => w.week === wk).map(w => w.id);
-    const recog = ["ar2ru", "cloze"]; if (arVoice) recog.push("listen");
+  // Каждое слово один раз: две трети заданий «вспомни сам», треть — узнавание, в конце пары.
+  function testIds(kind, n) {
+    const wks = testWeeks(kind, n);
+    const ids = WORDS.filter(w => wks.includes(w.week)).map(w => w.id);
+    const size = TEST_KINDS[kind].size;
+    if (ids.length <= size) return ids;
+    // В большой зачёт сначала попадают слова, которые забывались, остальные — случайно.
+    const weak = shuffle(ids).sort((a, b) => ((me().words[b] || {}).lapses || 0) - ((me().words[a] || {}).lapses || 0));
+    return weak.slice(0, size);
+  }
+  function startTest(kind, n) {
+    const ids = shuffle(testIds(kind, n));
+    const recog = ["ar2ru", "cloze"];
     const prod = ["ru2ar", "build", "type"];
-    const a = shuffle(ids).map(id => ({ type: pick(recog), id }));
-    const b = shuffle(ids).map(id => ({ type: pick(prod), id }));
-    const tasks = a.concat(b);
-    tasks.push({ type: "match", ids: shuffle(ids).slice(0, 5) });
+    const tasks = ids.map((id, i) => ({ type: pick(i % 3 === 2 ? recog : prod), id }));
+    if (ids.length >= 4) tasks.push({ type: "match", ids: shuffle(ids).slice(0, 5) });
+    const spec = TEST_KINDS[kind];
+    const title = "Зачёт, " + spec.name(n);
     runSession({
-      title: "Зачёт · неделя " + wk, tasks,
+      title, tasks,
       finish: res => {
         const agg = aggregate(res);
-        Object.entries(agg).forEach(([id, ok]) => gradeTest(id, ok));
+        Object.entries(agg).forEach(([id, ok]) => gradeTest(id, ok, spec.stage));
         const correct = res.filter(r => r.ok).length;
         const mistakes = Object.keys(agg).filter(id => !agg[id]);
+        const t = { kind, n, date: today(), correct, total: res.length, mistakes };
+        if (kind === "week") t.week = n;
         me().tests = me().tests || [];
-        me().tests.push({ week: wk, date: today(), correct, total: res.length, mistakes });
+        me().tests.push(t);
         save();
-        resultScreen({ title: "Зачёт, неделя " + wk, res, test: { week: wk, correct, total: res.length, mistakes },
-          note: "Следующий повтор этих слов через 2 недели. Слова с ошибками вернутся завтра." });
+        resultScreen({ title, res, test: t,
+          note: `Следующий повтор этих слов через ${spec.stage === 2 ? "2 недели" : spec.stage === 3 ? "месяц" : "3 месяца"}. Слова с ошибками вернутся завтра. Зачёт можно пересдать в любой момент.` });
       }
     });
   }
@@ -428,13 +492,18 @@
   // ── Движок упражнений ──
   function runSession({ title, tasks, finish }) {
     if (!tasks.length) return home();
+    tasks = tasks.slice();
     let i = 0;
     const res = [];
     const next = () => { i++; if (i >= tasks.length) finish(res); else show(); };
+    // Ошибку повторяем один раз в конце занятия. В оценку идёт только первая попытка.
+    const again = (t, results) => {
+      results.filter(r => !r.ok).forEach(r => tasks.push({ type: t.type === "match" ? "ar2ru" : t.type, id: r.id, retry: true }));
+    };
     function show() {
       const t = tasks[i];
       app.innerHTML = `<div class="wrap">
-        <div class="top"><button class="chip" id="quit">✕ Выйти</button><span class="muted small">${esc(title)} · ${i + 1}/${tasks.length}</span></div>
+        <div class="top"><button class="chip" id="quit">✕ Выйти</button><span class="muted small">${esc(title)} · ${i + 1}/${tasks.length}${t.retry ? " · ещё раз" : ""}</span></div>
         <div class="progress"><i style="width:${(i / tasks.length) * 100}%"></i></div>
         <div id="task" class="panel"></div>
         <div id="fb"></div>
@@ -442,7 +511,7 @@
       on("quit", home);
       const box = document.getElementById("task");
       const done = (results, answerHtml) => {
-        results.forEach(r => res.push(r));
+        if (!t.retry) { results.forEach(r => res.push(r)); again(t, results); }
         const ok = results.every(r => r.ok);
         const fb = document.getElementById("fb");
         fb.innerHTML = `<div class="feedback ${ok ? "ok" : "no"}"><span>${ok ? "Верно" : "Правильно:"} ${answerHtml || ""}</span>
@@ -456,6 +525,10 @@
     show();
   }
 
+  // В заданиях вместо озвучки — фото слова (если есть), иначе эмодзи.
+  const pic = w => w.photo && w.photo.src
+    ? `<img src="${esc(w.photo.src)}" alt="" style="width:120px;height:120px;object-fit:cover;border-radius:14px;margin:0 auto 6px;display:block">`
+    : `<div style="font-size:2rem">${w.emoji || ""}</div>`;
   const ansAr = w => `<span class="ar">${w.ar}</span> — ${esc(w.ru)}`;
 
   function choice(box, prompt, options, correctId, isAr, onPick) {
@@ -472,21 +545,14 @@
     ar2ru(box, t, done) {
       const w = byId[t.id];
       const opts = shuffle([w, ...distractors(t.id)]);
-      choice(box, `<span class="label">Что значит слово?</span><div class="q"><div class="ar">${w.ar}</div>${speakBtn(w.ar)}</div>`, opts, w.id, false,
-        ok => { if (ok) speak(w.ar); done([{ id: w.id, ok }], ansAr(w)); });
+      choice(box, `<span class="label">Что значит слово?</span><div class="q"><div class="ar">${w.ar}</div></div>`, opts, w.id, false,
+        ok => { done([{ id: w.id, ok }], ansAr(w)); });
     },
     ru2ar(box, t, done) {
       const w = byId[t.id];
       const opts = shuffle([w, ...distractors(t.id)]);
-      choice(box, `<span class="label">Выбери арабское слово</span><div class="q"><div style="font-size:2rem">${w.emoji || ""}</div><div class="tr">${esc(w.ru)}</div></div>`, opts, w.id, true,
-        ok => { speak(w.ar); done([{ id: w.id, ok }], ansAr(w)); });
-    },
-    listen(box, t, done) {
-      const w = byId[t.id];
-      const opts = shuffle([w, ...distractors(t.id)]);
-      choice(box, `<span class="label">Послушай и выбери перевод</span><div class="q"><button class="btn soft" data-say="${esc(w.ar)}">🔊 Послушать ещё раз</button></div>`, opts, w.id, false,
-        ok => done([{ id: w.id, ok }], ansAr(w)));
-      setTimeout(() => speak(w.ar), 250);
+      choice(box, `<span class="label">Выбери арабское слово</span><div class="q">${pic(w)}<div class="tr">${esc(w.ru)}</div></div>`, opts, w.id, true,
+        ok => { done([{ id: w.id, ok }], ansAr(w)); });
     },
     cloze(box, t, done) {
       const w = byId[t.id];
@@ -500,7 +566,6 @@
       box.innerHTML = `<span class="label">Вспомни перевод, потом открой</span>
         <div class="flip" id="fl"><div class="q"><div class="ar">${w.ar}</div><p class="muted">Нажми, чтобы проверить</p></div></div>`;
       document.getElementById("fl").onclick = () => {
-        speak(w.ar);
         box.innerHTML = `<span class="label">Ты вспомнил?</span>
           <div class="q"><div class="ar">${w.ar}</div><div class="tr">${esc(w.ru)}</div></div>
           <div class="row"><button class="btn ghost" id="no">Не вспомнил</button><button class="btn" id="yes">Вспомнил</button></div>`;
@@ -515,7 +580,7 @@
       const tiles = shuffle(letters.concat(extra));
       let used = [];
       box.innerHTML = `<span class="label">Собери слово из букв</span>
-        <div class="q"><div style="font-size:2rem">${w.emoji || ""}</div><div class="tr">${esc(w.ru)}</div></div>
+        <div class="q">${pic(w)}<div class="tr">${esc(w.ru)}</div></div>
         <div class="built" id="built">&nbsp;</div>
         <div class="tiles">${tiles.map((l, k) => `<button class="tile" data-k="${k}">${l}</button>`).join("")}</div>
         <div class="row"><button class="btn ghost" id="bs">⌫ Стереть</button><button class="btn" id="chk">Проверить</button></div>`;
@@ -527,21 +592,20 @@
       on("chk", () => {
         const ok = norm(used.map(k => tiles[k]).join("")) === norm(w.ar);
         box.querySelectorAll("button").forEach(b => b.disabled = true);
-        speak(w.ar);
         done([{ id: w.id, ok }], ansAr(w));
       });
     },
     type(box, t, done) {
       const w = byId[t.id];
       box.innerHTML = `<span class="label">Напиши по-арабски</span>
-        <div class="q"><div style="font-size:2rem">${w.emoji || ""}</div><div class="tr">${esc(w.ru)}</div></div>
+        <div class="q">${pic(w)}<div class="tr">${esc(w.ru)}</div></div>
         <form id="tf" class="kv" style="gap:8px">
           <input id="tin" class="input-ar" lang="ar" dir="rtl" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="اُكْتُبْ هُنَا">
           <p class="muted small">Огласовки можно не ставить. Нужна арабская раскладка на телефоне.</p>
           <div class="row"><button class="btn ghost" type="button" id="idk">Не знаю</button><button class="btn" type="submit">Проверить</button></div>
         </form>`;
       const inp = document.getElementById("tin");
-      const finish = ok => { box.querySelectorAll("button, input").forEach(b => b.disabled = true); speak(w.ar); done([{ id: w.id, ok }], ansAr(w)); };
+      const finish = ok => { box.querySelectorAll("button, input").forEach(b => b.disabled = true); done([{ id: w.id, ok }], ansAr(w)); };
       document.getElementById("tf").onsubmit = e => { e.preventDefault(); if (inp.value.trim()) finish(norm(inp.value) === norm(w.ar)); };
       on("idk", () => finish(false));
       inp.focus();
@@ -555,7 +619,7 @@
         <div class="match"><div class="col">${left.map(w => `<button class="opt ar" data-l="${w.id}">${w.ar}</button>`).join("")}</div>
         <div class="col">${right.map(w => `<button class="opt" data-r="${w.id}">${esc(w.ru)}</button>`).join("")}</div></div>`;
       const L = [...box.querySelectorAll("[data-l]")], R = [...box.querySelectorAll("[data-r]")];
-      L.forEach(b => b.onclick = () => { L.forEach(x => x.classList.remove("sel")); b.classList.add("sel"); sel = b.dataset.l; speak(byId[sel].ar); });
+      L.forEach(b => b.onclick = () => { L.forEach(x => x.classList.remove("sel")); b.classList.add("sel"); sel = b.dataset.l; });
       R.forEach(b => b.onclick = () => {
         if (!sel) return;
         if (b.dataset.r === sel) {
@@ -603,7 +667,7 @@
   }
   function shareText(t) {
     const miss = t.mistakes.map(id => byId[id].ar + " (" + byId[id].ru + ")").join(", ");
-    return `${store.current} · Зачёт, неделя ${t.week}: ${t.correct}/${t.total} (${pct(t.correct, t.total)}%)` + (miss ? `\nОшибки: ${miss}` : "\nБез ошибок!");
+    return `${store.current} · Зачёт, ${testName(t)}: ${t.correct}/${t.total} (${pct(t.correct, t.total)}%)` + (miss ? `\nОшибки: ${miss}` : "\nБез ошибок!");
   }
 
   // ── Резервная копия ──
