@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Калимат</title>
-<meta name="theme-color" content="#f1f1ee" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#151514" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#FAF0E6" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1E130E" media="(prefers-color-scheme: dark)">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icons/icon-180.png">
@@ -19,9 +19,9 @@
 </script>
 <style>
   /* Фон до загрузки style.css: без белой или чёрной вспышки на ярлыке iPhone. */
-  html { background: #f1f1ee; }
-  @media (prefers-color-scheme: dark) { html:not([data-theme="light"]) { background: #151514; } }
-  html[data-theme="dark"] { background: #151514; }
+  html { background: #FAF0E6; }
+  @media (prefers-color-scheme: dark) { html:not([data-theme="light"]) { background: #1E130E; } }
+  html[data-theme="dark"] { background: #1E130E; }
 </style>
 <link rel="preload" href="fonts/golos-text-cyrillic.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="fonts/scheherazade-new-400-arabic.woff2" as="font" type="font/woff2" crossorigin>
@@ -29,6 +29,7 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+<div class="bgfx" aria-hidden="true"><span></span><span></span></div>
 <main id="app"></main>
 <script src="firebase-config.js"></script>
 <script src="words.js"></script>

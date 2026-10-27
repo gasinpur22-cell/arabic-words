@@ -86,7 +86,7 @@
       if (snap.exists) {
         const d = snap.data();
         if (!local || (d.updated || 0) > (local.updated || 0)) {
-          store.profiles[n] = { name: n, words: d.words || {}, tests: d.tests || [], days: d.days || [], updated: d.updated || 0 };
+          store.profiles[n] = { name: n, words: d.words || {}, tests: d.tests || [], days: d.days || [], stat: d.stat, updated: d.updated || 0 };
           try { localStorage.setItem(KEY, JSON.stringify(store)); } catch (e) {}
           if (screen === home && store.current === n) home();
           return;
@@ -175,22 +175,753 @@
     return [...same, ...rest].slice(0, n);
   }
 
-  // Общие обработчики по data-атрибутам
-  app.addEventListener("click", e => {
-    const reveal = e.target.closest("[data-reveal]");
-    if (reveal) { reveal.closest(".wcard").classList.add("open"); reveal.setAttribute("aria-expanded", "true"); return; }
-    const word = e.target.closest("[data-word]");
-    if (word) showWord(word.dataset.word, currentBack);
-  });
-  let currentBack = home;
-  let screen = null; // какой экран сейчас открыт: главную можно перерисовать, когда придут данные
 
-  function dotClass(id) {
-    const s = me().words[id];
-    if (!s) return "dot";
-    if (s.lapse) return "dot lapse";
-    return "dot s" + s.stage;
+  // ── Экраны ──
+  // Экран рисуется целиком. Анимация появления и прокрутка наверх — только при переходе на новый экран
+  // или к новому заданию (key), а не при каждом нажатии, иначе экран дёргается.
+  let screen = null; // функция открытого экрана: главную можно перерисовать, когда придут данные
+  let viewKey = null;
+  let acts = {}; // обработчики кнопок data-act текущего экрана
+  let currentBack = () => home();
+  function view(html, key, handlers) {
+    const fresh = key !== viewKey;
+    viewKey = key;
+    acts = handlers || {};
+    app.innerHTML = `<div class="scr${fresh ? " enter" : ""}">${html}</div>`;
+    if (fresh) window.scrollTo(0, 0);
   }
+  app.addEventListener("click", e => {
+    const b = e.target.closest("button");
+    if (!b || b.disabled) return;
+    if (b.dataset.act && acts[b.dataset.act]) return acts[b.dataset.act](b);
+    if (b.dataset.word) showWord(b.dataset.word, currentBack);
+  });
+  app.addEventListener("submit", e => {
+    e.preventDefault();
+    if (acts.submit) acts.submit(e.target);
+  });
+
+  const ICON = {
+    back: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>',
+    close: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+    check: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+    chev: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>'
+  };
+  const backBtn = (act, label = "Назад") => `<button class="ibtn" data-act="${act}" aria-label="${label}">${act === "quit" ? ICON.close : ICON.back}</button>`;
+
+  // ── Состояние слова ──
+  // Три состояния: «новое» — урока ещё не было; «учу» — урок пройден, но слово не проверено временем
+  // или недавно забылось; «знаю» — прошло два повтора в разные дни (ступень 2) или зачёт, без свежей ошибки.
+  function status(id) {
+    const s = me().words[id];
+    if (!s) return "new";
+    return s.stage >= 2 && !s.lapse ? "known" : "learn";
+  }
+  const ST_NAME = { new: "новое", learn: "учу", known: "знаю" };
+  const stIcon = k => `<i class="st ${k}" aria-hidden="true">${k === "known" ? ICON.check : ""}</i>`;
+  const chip = id => { const k = status(id); return `<span class="chip ${k}">${stIcon(k)}${ST_NAME[k]}</span>`; };
+  const legend = () => `<div class="legend">${["new", "learn", "known"].map(k => `<span>${stIcon(k)}${ST_NAME[k]}</span>`).join("")}</div>`;
+
+  // Тренировка — не повтор по расписанию: верный ответ засчитывается, только если слову и так пора,
+  // а ошибка всегда возвращает слово в «учу».
+  function practiceGrade(id, ok) {
+    const s = me().words[id];
+    if (s && (!ok || s.due <= today())) grade(id, ok);
+  }
+  function addStat(res) {
+    const st = me().stat = me().stat || { n: 0, ok: 0 };
+    st.n += res.length; st.ok += res.filter(r => r.ok).length;
+  }
+
+  // ── Дни и уроки ──
+  // Одна группа — три слова одного дня недели. Новый урок открывается раз в календарный день.
+  const groups = [];
+  WORDS.forEach(w => { const k = dayKey(w); let g = groups.find(x => x.k === k); if (!g) groups.push(g = { k, week: w.week, day: w.day, ids: [] }); g.ids.push(w.id); });
+  const groupDone = g => g.ids.every(id => me().words[id]);
+  function todayGroup() {
+    const learnedToday = groups.filter(g => groupDone(g) && g.ids.some(id => me().words[id].learned === today()));
+    const fresh = groups.find(g => !groupDone(g));
+    if (learnedToday.length) return { g: learnedToday[learnedToday.length - 1], done: true, next: fresh };
+    if (fresh) return { g: fresh, done: false, next: fresh };
+    return { g: groups[groups.length - 1], done: true, next: null };
+  }
+
+  // Зачёт показывается на главной только в свой день: когда все слова его недель пройдены, а сдачи ещё не было.
+  function pendingTest() {
+    const tests = me().tests || [];
+    const ready = wks => wks.every(wk => weeks.includes(wk)) && WORDS.filter(w => wks.includes(w.week)).every(w => me().words[w.id]);
+    for (const kind of ["quarter", "month", "week"]) {
+      for (let n = 1; n * TEST_KINDS[kind].weeks <= (weeks[weeks.length - 1] || 0); n++) {
+        if (ready(testWeeks(kind, n)) && bestScore(tests, kind, n) < 0) return { kind, n };
+      }
+    }
+    return null;
+  }
+  const TEST_TITLE = { week: n => "Сегодня зачёт недели " + n, month: () => "Сегодня месячный зачёт", quarter: () => "Сегодня зачёт за 3 месяца" };
+  function testSub(kind, n) {
+    const k = testIds(kind, n).length;
+    if (kind === "week") return `${plural(k, "слово", "слова", "слов")} вперемешку, около ${Math.max(2, Math.round(k / 4))} минут.`;
+    const ws = testWeeks(kind, n);
+    return `${plural(k, "слово", "слова", "слов")} из недель ${ws[0]}–${ws[ws.length - 1]}, около ${Math.max(2, Math.round(k / 4))} минут.`;
+  }
+
+  // ── Главная ──
+  let selDay = null; // какой день недели открыт в плитках (сбрасывается при уходе с главной)
+  function home() {
+    currentBack = home;
+    screen = home;
+    if (!store.current || !me()) {
+      view(`<div class="hdr"><div><span class="lbl">калимат</span><h1>Ахлян!</h1></div></div>`, "empty");
+      if (!document.querySelector(".modal")) profileModal(true);
+      return;
+    }
+    const tg = todayGroup(), wk = tg.g.week;
+    const weekGroups = groups.filter(g => g.week === wk);
+    if (!selDay || !weekGroups.some(g => g.day === selDay)) selDay = tg.g.day;
+    const sel = weekGroups.find(g => g.day === selDay);
+    const isToday = sel === tg.g;
+    const locked = !groupDone(sel) && !isToday;
+    const due = dueIds(), nRev = Math.min(due.length, REVIEW_LIMIT);
+    const test = pendingTest();
+    const name = store.current.trim();
+
+    const days = weekGroups.map(g => {
+      const d = groupDone(g), cls = ["day", d ? "done" : "", g === tg.g ? "today" : "", g === sel ? "sel" : ""].join(" ");
+      return `<button class="${cls}" data-act="day" data-d="${g.day}" aria-label="День ${g.day}${d ? ", пройден" : ""}" aria-pressed="${g === sel}"><i>${d ? ICON.check : g.day}</i></button>`;
+    }).join("");
+
+    let hero = "";
+    if (test) hero = `<section class="tile hero grad">
+        <span class="lbl">${test.kind === "week" ? "Неделя пройдена" : test.kind === "month" ? "Прошло 4 недели" : "Прошло 12 недель"}</span>
+        <h2>${TEST_TITLE[test.kind](test.n)}</h2>
+        <span class="muted">${testSub(test.kind, test.n)}</span>
+        <button class="btn inv press" data-act="test">Сдать зачёт</button>
+      </section>`;
+    else if (tg.done) hero = `<section class="tile hero">
+        <span class="lbl">Сегодня</span>
+        <h2>${tg.next ? "Слова дня выучены" : "Все слова пройдены"}</h2>
+        <span class="muted">${tg.next ? "Новые три слова откроются завтра." : "Новые слова появятся, когда их добавят в словарь."}${nRev ? "" : nextDue() ? " Следующий повтор: " + inDays(nextDue()) + "." : ""}</span>
+      </section>`;
+
+    const tiles = sel.ids.map(id => {
+      const w = byId[id];
+      return locked
+        ? `<button class="tile wtile locked" disabled><span class="ru"><b>откроется в день ${sel.day}</b></span><span class="ar" aria-hidden="true">${w.ar}</span></button>`
+        : `<button class="tile wtile press" data-word="${id}"><span class="ru"><b>${esc(w.ru)}</b>${chip(id)}</span><span class="ar">${w.ar}</span></button>`;
+    }).join("");
+    const showTiles = !(test && tg.done);
+
+    const mins = Math.max(1, Math.ceil(nRev / 3) + 2);
+    let main;
+    if (!tg.done) main = `<div class="row2 wide"><button class="btn press" data-act="go">${nRev ? "Повтор и урок" : "Начать урок"} · ${mins} мин</button><button class="btn ghost press" data-act="study">Заучивание</button></div>`;
+    else if (nRev) main = `<div class="row2 wide"><button class="btn press" data-act="review">Повторить · ${plural(nRev, "слово", "слова", "слов")}</button><button class="btn ghost press" data-act="study">Заучивание</button></div>`;
+    else main = `<button class="btn ${test ? "ghost" : ""} press" data-act="study">Заучивание</button>`;
+
+    const rows = (gs, lockFrom) => gs.map(g => `<div class="wrow"><span class="dn">${g.day}</span>${g.ids.map(id => {
+      const k = status(id);
+      return lockFrom && g !== tg.g && !groupDone(g)
+        ? `<button disabled aria-label="Ещё закрыто"><span>${byId[id].ar}</span></button>`
+        : `<button class="${k}" data-word="${id}" aria-label="${esc(byId[id].ru)}, ${ST_NAME[k]}">${stIcon(k)}<span>${byId[id].ar}</span></button>`;
+    }).join("")}</div>`).join("");
+    const known = ids => ids.filter(id => status(id) === "known").length;
+    const wIds = weekGroups.flatMap(g => g.ids);
+    const older = weeks.filter(x => x !== wk).reverse().map(x => {
+      const gs = groups.filter(g => g.week === x), ids = gs.flatMap(g => g.ids), key = "w" + x;
+      return `<section class="tile weekrows" style="padding-block:4px">
+        <button class="fold" data-act="fold" data-key="${key}" aria-expanded="${!!ui.open[key]}"><b>Неделя ${x}</b><span class="muted small" style="margin-left:auto">знаю ${known(ids)} из ${ids.length}</span>${ICON.chev}</button>
+        ${ui.open[key] ? rows(gs, false) : ""}
+      </section>`;
+    }).join("");
+
+    view(`
+      <div class="hdr">
+        <div style="min-width:0"><span class="lbl">Неделя ${wk} · день ${tg.g.day}</span><h1>Салам, ${esc(name)}</h1></div>
+        <button class="ibtn av press" data-act="profile" aria-label="Профиль и общая таблица">${esc(name.charAt(0).toUpperCase())}</button>
+      </div>
+      ${cloud === "failed" ? `<p class="note">Нет связи с базой: прогресс сохраняется на телефоне и уйдёт в базу, когда появится интернет. <button class="link" data-act="retry">Повторить</button></p>` : ""}
+      <div class="days">${days}</div>
+      ${hero}
+      ${showTiles ? `<div class="secthead"><b>${isToday ? "Слова дня" : "День " + sel.day}</b><span class="muted small">${locked ? "ещё закрыто" : isToday && !tg.done ? "3 новых" : ""}</span></div>
+      <div class="words">${tiles}</div>` : ""}
+      ${main}
+      <div class="secthead" style="margin-top:4px"><b>Неделя ${wk}</b><span class="muted small">знаю ${known(wIds)} из ${wIds.length}</span></div>
+      ${legend()}
+      <section class="tile weekrows">${rows(weekGroups, true)}</section>
+      ${wIds.some(id => !me().words[id]) ? `<button class="link" data-act="markweek">Я уже знаю слова этой недели</button>` : ""}
+      ${older}
+    `, "home", {
+      day: b => { selDay = +b.dataset.d; home(); },
+      go: () => due.length ? startReview(tg.g.k) : lesson(tg.g.k),
+      review: () => startReview(null),
+      study: studySetup,
+      test: () => testIntro(test.kind, test.n),
+      profile: profileScreen,
+      retry: connect,
+      fold: b => { const k = b.dataset.key; ui.open[k] = !ui.open[k]; saveUi(); home(); },
+      markweek: () => {
+        if (!confirm(`Отметить все слова недели ${wk} как знакомые? Они сразу пойдут в повторение, отменить это нельзя.`)) return;
+        WORDS.filter(w => w.week === wk && !me().words[w.id]).forEach(w => { learn(w.id, 1); me().words[w.id].due = today() + 1; });
+        save(); home();
+      }
+    });
+  }
+
+  // ── Карточка слова ──
+  const rich = t => esc(t).replace(/[؀-ۿ](?:[؀-ۿ\s–-]*[؀-ۿ])?/g, m => `<bdi class="ar">${m}</bdi>`);
+  const pairsHtml = list => list.map(p => `<div class="pair"><span class="ar">${p[0]}</span><span>${esc(p[1])}</span></div>`).join("");
+  function ayahHtml(q) {
+    const ws = q.ar.split(" ");
+    const mark = (a, at) => a.map((x, i) => i === at ? `<mark>${x}</mark>` : x).join(" ");
+    const from = Math.max(0, q.hl - 3), to = Math.min(ws.length, q.hl + 4);
+    const frag = (from > 0 ? "… " : "") + mark(ws.slice(from, to), q.hl - from) + (to < ws.length ? " …" : "");
+    return `<details class="ayah"><summary><span class="ar">${frag}</span><span class="ref">${esc(q.ref)} · <b class="more">весь аят</b><b class="less">свернуть</b></span></summary>
+      <p class="ar full">${mark(ws, q.hl)}</p><p>${esc(q.ru)}</p></details>`;
+  }
+  function details(w) {
+    const sec = (t, body) => `<section class="tile sec"><span class="lbl">${t}</span>${body}</section>`;
+    const quran = w.quran || [];
+    return [
+      sec("Корень", `<div class="roots">${w.root.map(l => `<span>${l}</span>`).join("")}</div><p class="center">${esc(w.rootMeaning)}</p>`),
+      sec("Как запомнить", [].concat(w.assoc).map(a => `<p>${rich(a)}</p>`).join("")),
+      sec("Словосочетания", pairsHtml(w.phrases)),
+      sec("Как образовано", `<p>${rich(w.pattern)}</p>`),
+      w.plural ? sec("Множественное число", `<p class="ar plural">${w.plural}</p>`) : "",
+      w.related && w.related.length ? sec("Однокоренные слова", pairsHtml(w.related)) : "",
+      w.examples && w.examples.length ? sec("Примеры из жизни", w.examples.map(p => `<div class="ex"><p class="ar">${p[0]}</p><p class="muted">${esc(p[1])}</p></div>`).join("")) : "",
+      w.facts && w.facts.length ? sec("Интересно", `<ul class="facts">${w.facts.map(f => `<li>${rich(f)}</li>`).join("")}</ul>`) : "",
+      quran.length || w.qnote ? sec("В Коране", quran.map(ayahHtml).join("") + (w.qnote ? `<p class="muted small">${rich(w.qnote)}</p>` : "")) : ""
+    ].join("");
+  }
+  const photo = w => w.photo && w.photo.src
+    ? `<img src="${esc(w.photo.src)}" alt="${esc(w.ru)}" decoding="async"><span class="cap">Фото: ${esc(w.photo.credit)}</span>` : "";
+
+  function showWord(id, back) {
+    const w = byId[id]; if (!w) return;
+    screen = showWord;
+    back = back || home;
+    // Листать можно по словам, которые уже открыты: пройденные и слова сегодняшнего урока.
+    const tg = todayGroup();
+    const ids = WORDS.filter(x => me().words[x.id] || tg.g.ids.includes(x.id)).map(x => x.id);
+    const i = ids.indexOf(id);
+    view(`
+      <div class="top">${backBtn("back")}${chip(id)}<span class="count">нед. ${w.week} · день ${w.day}</span></div>
+      <article class="tile wcard">${photo(w)}<div class="whead"><span class="ar">${w.ar}</span><span class="tr">${esc(w.ru)}</span></div></article>
+      ${details(w)}
+      ${ids.length > 1 && i >= 0 ? `<div class="row2">
+        <button class="btn ghost press" data-act="prev" ${i > 0 ? "" : "disabled"}>← Предыдущее</button>
+        <button class="btn ghost press" data-act="next" ${i < ids.length - 1 ? "" : "disabled"}>Следующее →</button>
+      </div>` : ""}
+    `, "word:" + id, {
+      back: () => back(),
+      prev: () => showWord(ids[i - 1], back),
+      next: () => showWord(ids[i + 1], back)
+    });
+  }
+
+  // ── Урок дня: слово закрыто, нажатие открывает перевод и всю карточку ──
+  function lesson(k) {
+    const ids = groups.find(g => g.k === k).ids;
+    let li = 0, open = false;
+    const draw = () => {
+      screen = lesson;
+      const w = byId[ids[li]];
+      currentBack = draw;
+      view(`
+        <div class="top">${backBtn("quit", "Закрыть урок")}<div class="prog"><i style="width:${(li + (open ? 1 : 0)) / ids.length * 100}%"></i></div><span class="count">${li + 1}/${ids.length}</span></div>
+        <article class="tile wcard">
+          ${open ? photo(w) : ""}
+          <button class="reveal" data-act="reveal" ${open ? "disabled" : ""} aria-expanded="${open}">
+            <span class="whead${open ? "" : " closed"}">
+              <span class="ar">${w.ar}</span>
+              ${open ? `<span class="tr tr-show">${esc(w.ru)}</span>` : `<span class="tr hidden-tr" aria-hidden="true">${"•".repeat(Math.min(10, w.ru.length))}</span><span class="ask">Вспомни перевод и нажми</span>`}
+            </span>
+          </button>
+        </article>
+        ${open ? details(w) : `<div class="grow"></div>`}
+        ${open ? `<button class="btn press" data-act="next">${li < ids.length - 1 ? "Следующее слово" : "Готово"}</button>` : ""}
+      `, "lesson:" + k + ":" + li, {
+        quit: home,
+        reveal: () => { open = true; draw(); },
+        next: () => {
+          if (li < ids.length - 1) { li++; open = false; return draw(); }
+          ids.forEach(id => { if (!me().words[id]) learn(id, 0); });
+          markDay(); save();
+          lessonDone(ids);
+        }
+      });
+    };
+    draw();
+  }
+  function lessonDone(ids) {
+    screen = lessonDone;
+    currentBack = () => lessonDone(ids);
+    view(`
+      <div class="donebox" id="donebox">
+        <div class="medal">${ICON.check}</div>
+        <h2>${ids.length} ${plural(ids.length, "слово", "слова", "слов").replace(/^\d+ /, "")} в «Учу»</h2>
+        <div class="learned-row">${ids.map(id => `<span class="ar">${byId[id].ar}</span>`).join("")}</div>
+        <p class="muted" style="max-width:290px">Закрепи их сейчас: короткая тренировка займёт около минуты. Первый повтор через 2 дня.</p>
+      </div>
+      <div class="row2"><button class="btn ghost press" data-act="home">На главную</button><button class="btn press" data-act="drill">Закрепить</button></div>
+    `, "lessondone", { home, drill: () => startPractice(ids) });
+    sparks();
+  }
+
+  // ── Заучивание ──
+  // Тренировка всегда смешанная: пары на разогрев, потом на каждое слово одно задание «узнать»
+  // (выбор перевода, выбор слова, вставить в предложение) и одно «вспомнить» (карточка, собрать из букв,
+  // написать перевод). Слова «учу» получают третье задание. Секунды на задание подобраны так,
+  // чтобы вся неделя (21 слово) шла не дольше 10 минут.
+  const SEC = { match: 20, ar2ru: 7, ru2ar: 7, cloze: 9, flip: 8, build: 12, type: 10 };
+  const chunk = (a, n) => a.reduce((r, x, i) => (i % n ? r[r.length - 1].push(x) : r.push([x]), r), []);
+  const recog = id => ({ type: pick(["ar2ru", "ru2ar", "cloze"]), id });
+  const recall = id => ({ type: pick(["flip", "build", "type"]), id });
+  function practicePlan(ids) {
+    const pairs = ids.length >= 3 ? chunk(shuffle(ids), 5).filter(g => g.length >= 3).map(g => ({ type: "match", ids: g })) : [];
+    const extra = ids.filter(id => status(id) === "learn").map(id => pick([recog, recall])(id));
+    return [...pairs, ...shuffle(ids.map(recog)), ...shuffle(ids.map(recall)), ...shuffle(extra)];
+  }
+  const minutes = tasks => Math.max(1, Math.round(tasks.reduce((s, t) => s + SEC[t.type], 0) / 60));
+  let studyScope = "today";
+  function studySetup() {
+    screen = studySetup;
+    currentBack = studySetup;
+    const tg = todayGroup(), wk = tg.g.week;
+    const opened = WORDS.filter(w => me().words[w.id]).map(w => w.id);
+    const scopes = [
+      ["today", "Слова дня", tg.done ? "три слова сегодняшнего урока" : "сначала пройди урок дня", tg.done ? tg.g.ids : []],
+      ["learn", "Только «учу»", "слова, которые ещё не закрепились", opened.filter(id => status(id) === "learn")],
+      ["week", "Вся неделя", "все пройденные слова недели " + wk, opened.filter(id => byId[id].week === wk)]
+    ];
+    if (!scopes.find(s => s[0] === studyScope)[3].length) studyScope = (scopes.find(s => s[3].length) || scopes[0])[0];
+    const cur = scopes.find(s => s[0] === studyScope)[3];
+    view(`
+      <div class="top">${backBtn("back")}<b>Заучивание</b><span style="width:44px"></span></div>
+      <div class="opts">${scopes.map(([k, t, d, ids]) => `<button class="tile opt press" data-act="scope" data-k="${k}" aria-pressed="${studyScope === k}" ${ids.length ? "" : "disabled"}>
+        <span class="rd"></span><span><b>${t}</b><small>${d}</small></span>
+        <span class="n">${plural(ids.length, "слово", "слова", "слов")}${ids.length ? `<small>≈ ${minutes(practicePlan(ids))} мин</small>` : ""}</span></button>`).join("")}</div>
+      <div class="grow"></div>
+      <button class="btn press" data-act="go" ${cur.length ? "" : "disabled"}>Начать</button>
+    `, "study", {
+      back: home,
+      scope: b => { studyScope = b.dataset.k; studySetup(); },
+      go: () => startPractice(cur)
+    });
+  }
+  function startPractice(ids) {
+    runSession({
+      title: "Заучивание", tasks: practicePlan(ids), back: studySetup,
+      finish: res => {
+        const agg = aggregate(res);
+        Object.entries(agg).forEach(([id, ok]) => practiceGrade(id, ok));
+        addStat(res); markDay(); save();
+        resultScreen({ title: "Заучивание", res, note: Object.values(agg).some(ok => !ok) ? "Слова с ошибками теперь в «Учу»." : "" });
+      }
+    });
+  }
+
+  // ── Повторение по расписанию ──
+  // nextK — урок дня: после повторения сразу предложим перейти к нему.
+  function startReview(nextK) {
+    const ids = shuffle(dueIds().slice(0, REVIEW_LIMIT));
+    const tasks = ids.map(id => me().words[id].stage < 2 ? pick([recog, () => ({ type: "flip", id })])(id) : recall(id));
+    runSession({
+      title: "Повторение", tasks, back: home,
+      finish: res => {
+        const agg = aggregate(res);
+        Object.entries(agg).forEach(([id, ok]) => grade(id, ok));
+        addStat(res); markDay(); save();
+        const left = dueIds().length;
+        resultScreen({ title: "Повторение", res,
+          note: "Слова с ошибками вернутся завтра." + (left ? " Ещё " + plural(left, "слово ждёт", "слова ждут", "слов ждут") + " повтора." : ""),
+          next: nextK ? { label: "Дальше: урок дня", fn: () => lesson(nextK) } : null });
+      }
+    });
+  }
+
+  // ── Зачёт ──
+  // Каждое слово один раз: две трети заданий «вспомни сам», треть — узнавание, в конце пары.
+  function testIds(kind, n) {
+    const wks = testWeeks(kind, n);
+    const ids = WORDS.filter(w => wks.includes(w.week)).map(w => w.id);
+    const size = TEST_KINDS[kind].size;
+    if (ids.length <= size) return ids;
+    // В большой зачёт сначала попадают слова, которые забывались, остальные — случайно.
+    const weak = shuffle(ids).sort((a, b) => ((me().words[b] || {}).lapses || 0) - ((me().words[a] || {}).lapses || 0));
+    return weak.slice(0, size);
+  }
+  function testIntro(kind, n) {
+    screen = testIntro;
+    const k = testIds(kind, n).length, name = TEST_KINDS[kind].name(n);
+    view(`
+      <div class="top">${backBtn("back")}<span></span></div>
+      <div class="donebox">
+        <span class="lbl">Зачёт · ${esc(name)}</span>
+        <div class="medal">${k}</div>
+        <h2>${plural(k, "слово", "слова", "слов")} вперемешку</h2>
+        <p class="muted" style="max-width:300px">Выбор ответа, предложения, сборка слова и перевод своими словами. Верные слова сразу становятся «знаю». Результат попадёт в профиль и общую таблицу.</p>
+      </div>
+      <button class="btn press" data-act="go">Начать зачёт</button>
+    `, "testintro", { back: home, go: () => startTest(kind, n) });
+  }
+  function startTest(kind, n) {
+    const ids = shuffle(testIds(kind, n));
+    const tasks = ids.map((id, i) => i % 3 === 2 ? recog(id) : { type: pick(["ru2ar", "build", "type"]), id });
+    if (ids.length >= 4) tasks.push({ type: "match", ids: shuffle(ids).slice(0, 5) });
+    const spec = TEST_KINDS[kind];
+    const title = "Зачёт, " + spec.name(n);
+    runSession({
+      title, tasks, back: home, test: true,
+      finish: res => {
+        const agg = aggregate(res);
+        Object.entries(agg).forEach(([id, ok]) => gradeTest(id, ok, spec.stage));
+        const correct = res.filter(r => r.ok).length;
+        const mistakes = Object.keys(agg).filter(id => !agg[id]);
+        const t = { kind, n, date: today(), correct, total: res.length, mistakes };
+        if (kind === "week") t.week = n;
+        me().tests = me().tests || [];
+        me().tests.push(t);
+        addStat(res); markDay(); save();
+        resultScreen({ title, res, test: t,
+          note: `Следующий повтор этих слов через ${spec.stage === 2 ? "2 недели" : spec.stage === 3 ? "месяц" : "3 месяца"}. Слова с ошибками вернутся завтра. Пересдать можно из профиля.` });
+      }
+    });
+  }
+
+  function aggregate(res) {
+    const agg = {};
+    res.forEach(r => { agg[r.id] = (agg[r.id] !== undefined ? agg[r.id] : true) && r.ok; });
+    return agg;
+  }
+
+  // ── Движок упражнений ──
+  // В оценку идёт первая попытка по каждому заданию. Верный ответ сам переходит дальше,
+  // после ошибки показываем правильный ответ и кнопку «Дальше».
+  let sessionNo = 0;
+  const KIND = { match: "Соедини пары", ar2ru: "Выбери перевод", ru2ar: "Выбери слово", cloze: "Вставь слово", flip: "Вспомни", build: "Собери слово", type: "Напиши перевод" };
+  const ruNorm = s => s.toLowerCase().replace(/ё/g, "е").replace(/\([^)]*\)/g, "").replace(/[^а-яa-z\s-]/g, "").replace(/\s+/g, " ").trim();
+  function lev(a, b) {
+    const d = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+    for (let j = 1; j <= b.length; j++) d[0][j] = j;
+    for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++)
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    return d[a.length][b.length];
+  }
+  // Перевод засчитывается, если совпал с любым из вариантов; в длинных словах прощаем одну опечатку.
+  const ruOk = (typed, w) => { const v = ruNorm(typed); return !!v && w.ru.split(/[,;]/).map(ruNorm).some(x => x === v || (x.length >= 5 && lev(x, v) <= 1)); };
+
+  function runSession({ title, tasks, finish, back, test }) {
+    if (!tasks.length) return home();
+    const sid = ++sessionNo;
+    let i = 0;
+    const res = [];
+    tasks.forEach(t => { t.d = pick(["ar", "ru"]); });
+    const advance = () => { i++; if (i >= tasks.length) finish(res); else draw(); };
+    const record = (t, ok) => { res.push({ id: t.id, ok }); };
+    function draw() {
+      screen = runSession;
+      const t = tasks[i];
+      currentBack = draw;
+      const body = TASKS[t.type].html(t);
+      const fb = t.fb === "no" && t.type !== "match" ? wrongBox(t) : "";
+      view(`
+        <div class="top">${backBtn("quit", "Выйти")}<div class="prog"><i style="width:${i / tasks.length * 100}%"></i></div><span class="count">${i + 1}/${tasks.length}</span></div>
+        <span class="lbl kind">${test ? esc(title) + " · " : ""}${KIND[t.type]}</span>
+        ${body}${fb}
+      `, "run:" + sid + ":" + i, Object.assign({
+        quit: () => { if (i === 0 || confirm("Выйти? Ответы этого занятия не сохранятся.")) back(); },
+        cont: advance
+      }, TASKS[t.type].acts(t, (ok, auto) => {
+        record(t, ok);
+        if (auto === false) advance();
+        else if (ok) { t.fb = "ok"; draw(); setTimeout(() => { if (tasks[i] === t) advance(); }, 650); }
+        else { t.fb = "no"; if (navigator.vibrate) { try { navigator.vibrate(60); } catch (e) {} } draw(); }
+      }, draw, ids => ids.forEach(x => res.push(x)))));
+      const inp = app.querySelector("#tin");
+      if (inp && !t.fb && !matchMedia("(pointer: coarse)").matches) inp.focus({ preventScroll: true });
+    }
+    draw();
+  }
+  function wrongBox(t) {
+    const w = byId[t.id];
+    const answer = t.type === "cloze"
+      ? `<span class="ar">${w.cloze.ar.replace("___", w.ar)}</span><span>${esc(w.cloze.ru)}</span>`
+      : `<span><span class="ar">${w.ar}</span> · ${esc(w.ru)}</span>`;
+    return `<div class="fb no"><b>Правильный ответ</b>${answer}</div><button class="btn press" data-act="cont">Дальше</button>`;
+  }
+
+  // Каждое задание: html(t) рисует, acts(t, done, redraw, push) даёт обработчики кнопок.
+  // done(ok) — первая и единственная оценка задания; done(ok, false) — без паузы на «Верно».
+  const optsFor = t => t.opts || (t.opts = shuffle([byId[t.id], ...distractors(t.id)]));
+  const markOpt = (t, o) => t.ans ? (o.id === t.id ? " right" : o.id === t.ans ? " wrong" : "") : "";
+  const choiceActs = (t, done) => ({ ans: b => { if (t.ans) return; t.ans = b.dataset.o; done(t.ans === t.id); } });
+  const TASKS = {
+    ar2ru: {
+      html: t => `<div class="tile q"><span class="ar qa">${byId[t.id].ar}</span></div>
+        <div class="choices">${optsFor(t).map(o => `<button class="tile choice press${markOpt(t, o)}" data-act="ans" data-o="${o.id}" ${t.ans ? "disabled" : ""}>${esc(o.ru)}</button>`).join("")}</div>`,
+      acts: choiceActs
+    },
+    ru2ar: {
+      html: t => `<div class="tile q"><span class="qr">${esc(byId[t.id].ru)}</span></div>
+        <div class="choices grid">${optsFor(t).map(o => `<button class="tile choice press${markOpt(t, o)}" data-act="ans" data-o="${o.id}" ${t.ans ? "disabled" : ""}><span class="ar">${o.ar}</span></button>`).join("")}</div>`,
+      acts: choiceActs
+    },
+    cloze: {
+      html: t => {
+        const w = byId[t.id];
+        const sent = w.cloze.ar.replace("___", `<span class="gap">${t.ans ? w.ar : "؟"}</span>`);
+        return `<div class="tile q"><p class="ar sent">${sent}</p><span class="muted small">${esc(w.cloze.ru)}</span></div>
+          <div class="choices grid">${optsFor(t).map(o => `<button class="tile choice press${markOpt(t, o)}" data-act="ans" data-o="${o.id}" ${t.ans ? "disabled" : ""}><span class="ar">${o.ar}</span></button>`).join("")}</div>`;
+      },
+      acts: choiceActs
+    },
+    flip: {
+      html: t => {
+        const w = byId[t.id], ph = w.phrases && w.phrases[0];
+        const front = t.d === "ar" ? `<span class="ar qa">${w.ar}</span><span class="muted small">как переводится?</span>` : `<span class="qr">${esc(w.ru)}</span><span class="muted small">как будет по-арабски?</span>`;
+        const backSide = `<span class="ar a-ar">${w.ar}</span><span class="a-ru">${esc(w.ru)}</span>${ph ? `<span class="extra"><bdi class="ar">${ph[0]}</bdi> · ${esc(ph[1])}</span>` : ""}`;
+        return `<button class="tile q big press${t.flipped ? " flipped" : ""}" data-act="flip" ${t.flipped ? "disabled" : ""}>${t.flipped ? backSide : front + `<span class="ask" style="margin-top:22px">вспомни и нажми</span>`}</button>
+          <div class="grow"></div>
+          ${t.flipped ? `<div class="row2"><button class="btn ghost press" data-act="no">Не вспомнил</button><button class="btn press" data-act="yes">Вспомнил</button></div>` : ""}`;
+      },
+      acts: (t, done, redraw) => ({ flip: () => { t.flipped = true; redraw(); }, yes: () => done(true, false), no: () => done(false, false) })
+    },
+    build: {
+      html: t => {
+        const w = byId[t.id], target = Array.from(strip(w.ar));
+        if (!t.tiles) {
+          const extra = shuffle(Array.from(new Set(distractors(t.id, 4).flatMap(x => Array.from(strip(x.ar))))).filter(l => !target.includes(l))).slice(0, 2);
+          t.tiles = shuffle(target.concat(extra)); t.got = [];
+        }
+        const built = t.got.map(k => t.tiles[k]).join("");
+        const res = t.fb === "ok" ? " right" : t.fb === "no" ? " wrong" : "";
+        return `<div class="tile q"><span class="qr">${esc(w.ru)}</span><span class="muted small">собери слово по-арабски</span></div>
+          <div class="slot${built ? "" : " empty"}${res}" aria-live="polite">${built || "нажимай буквы по порядку"}</div>
+          <div class="letters">${t.tiles.map((c, k) => `<button class="tile press${t.got.includes(k) ? " used" : ""}" data-act="let" data-k="${k}" ${t.fb ? "disabled" : ""}>${c}</button>`).join("")}</div>
+          ${t.fb ? "" : `<div class="row2"><button class="btn ghost press" data-act="erase" ${t.got.length ? "" : "disabled"}>Стереть</button><button class="btn press" data-act="check" ${t.got.length ? "" : "disabled"}>Проверить</button></div>`}`;
+      },
+      acts: (t, done, redraw) => ({
+        let: b => { t.got.push(+b.dataset.k); redraw(); },
+        erase: () => { t.got.pop(); redraw(); },
+        check: () => done(norm(t.got.map(k => t.tiles[k]).join("")) === norm(byId[t.id].ar))
+      })
+    },
+    type: {
+      html: t => {
+        const w = byId[t.id], res = t.fb === "ok" ? " right" : t.fb === "no" ? " wrong" : "";
+        return `<div class="tile q"><span class="ar qa">${w.ar}</span><span class="muted small">напиши перевод по-русски</span></div>
+          <form class="tform" autocomplete="off">
+            <label for="tin" class="lbl" style="padding:0 4px">Перевод</label>
+            <input id="tin" class="field${res}" value="${esc(t.val || "")}" ${t.fb ? "disabled" : ""} autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="done">
+            ${t.fb ? "" : `<div class="row2"><button class="btn ghost press" type="button" data-act="idk">Не знаю</button><button class="btn press" type="submit">Проверить</button></div>`}
+          </form>`;
+      },
+      acts: (t, done) => ({
+        submit: f => { const v = f.querySelector("#tin").value; if (!v.trim() || t.fb) return; t.val = v; done(ruOk(v, byId[t.id])); },
+        idk: () => { t.val = ""; done(false); }
+      })
+    },
+    // Пары: соединяешь все, номер связи виден на обеих плитках, нажатие на пару её разъединяет.
+    // Проверка только когда соединено всё: верные зелёным, неверные красным.
+    match: {
+      html: t => {
+        if (!t.cols) { t.cols = { ar: shuffle(t.ids), ru: shuffle(t.ids) }; t.links = {}; t.sel = null; }
+        const order = Object.keys(t.links);
+        const ruOf = ar => order.find(k => t.links[k] === ar);
+        const tile = (side, id) => {
+          const ru = side === "ru" ? (id in t.links ? id : null) : ruOf(id), n = ru ? order.indexOf(ru) + 1 : 0;
+          const res = t.checked ? ((side === "ru" ? t.links[id] === id : ruOf(id) === id) ? " right" : " wrong") : "";
+          const cls = ["tile", "mt", "press", side === "ar" ? "ar" : "", n ? "linked" : "", t.sel && t.sel.side === side && t.sel.id === id ? "pick" : ""].join(" ") + res;
+          return `<button class="${cls}" data-act="m" data-side="${side}" data-id="${id}" ${t.checked ? "disabled" : ""}>${n && !t.checked ? `<span class="tag">${n}</span>` : ""}${side === "ar" ? byId[id].ar : esc(byId[id].ru)}</button>`;
+        };
+        const cells = t.cols.ru.map((id, k) => tile("ru", id) + tile("ar", t.cols.ar[k])).join("");
+        const bad = t.checked ? t.ids.filter(id => t.links[id] !== id) : [];
+        return `<div class="match">${cells}</div>
+          ${t.checked ? `<div class="fb ${bad.length ? "no" : "ok"}"><b>${bad.length ? "Ошибок: " + bad.length : "Все пары верные"}</b>${bad.map(id => `<span><span class="ar">${byId[id].ar}</span> · ${esc(byId[id].ru)}</span>`).join("")}</div>
+            <button class="btn press" data-act="cont">Дальше</button>`
+          : `<p class="muted small center">${order.length} из ${t.ids.length} соединено. Нажми на пару ещё раз, чтобы разъединить</p>`}`;
+      },
+      acts: (t, done, redraw, push) => ({
+        m: b => {
+          const side = b.dataset.side, id = b.dataset.id;
+          const linkedRu = side === "ru" ? (id in t.links ? id : null) : Object.keys(t.links).find(k => t.links[k] === id);
+          if (linkedRu && !t.sel) delete t.links[linkedRu];
+          else if (!t.sel || t.sel.side === side) t.sel = t.sel && t.sel.id === id ? null : { side, id };
+          else {
+            const ru = side === "ru" ? id : t.sel.id, ar = side === "ar" ? id : t.sel.id;
+            Object.keys(t.links).forEach(k => { if (k === ru || t.links[k] === ar) delete t.links[k]; });
+            t.links[ru] = ar; t.sel = null;
+            if (Object.keys(t.links).length === t.ids.length) {
+              t.checked = true;
+              push(t.ids.map(x => ({ id: x, ok: t.links[x] === x })));
+            }
+          }
+          redraw();
+        }
+      })
+    }
+  };
+
+  // ── Результат ──
+  function resultScreen({ title, res, note, test, next }) {
+    screen = resultScreen;
+    const correct = res.filter(r => r.ok).length, p = pct(correct, res.length);
+    const agg = aggregate(res), bad = Object.keys(agg).filter(id => !agg[id]);
+    currentBack = () => resultScreen({ title, res, note, test, next });
+    const head = test ? (p >= 80 ? "Зачёт сдан" : "Зачёт сдан, есть что подтянуть") : p === 100 ? "Без единой ошибки" : p >= 70 ? "Хорошо получилось" : "Надо повторить";
+    view(`
+      <div class="donebox" id="donebox">
+        <span class="lbl">${esc(title)}</span>
+        <div class="medal">${p}%</div>
+        <h2>${head}</h2>
+        <p class="muted">${correct} из ${res.length} верно${note ? ". " + esc(note) : ""}</p>
+        ${bad.length ? `<div class="tile misses">${bad.map(id => `<button class="pair" data-word="${id}"><span class="ar">${byId[id].ar}</span><span>${esc(byId[id].ru)}</span></button>`).join("")}</div>` : ""}
+      </div>
+      ${next ? `<button class="btn press" data-act="next">${esc(next.label)}</button>` : ""}
+      ${bad.length ? `<div class="row2"><button class="btn ghost press" data-act="home">На главную</button><button class="btn ${next ? "ghost " : ""}press" data-act="fix">Повторить ошибки</button></div>`
+        : `<button class="btn ${next ? "ghost " : ""}press" data-act="home">На главную</button>`}
+      ${test ? `<button class="btn ghost press" data-act="share">${navigator.share ? "Поделиться результатом" : "Скопировать результат"}</button>` : ""}
+    `, "result:" + sessionNo, {
+      home,
+      next: () => next.fn(),
+      fix: () => startPractice(bad),
+      share: b => {
+        const txt = shareText(test);
+        if (navigator.share) { navigator.share({ text: txt }).catch(() => {}); return; }
+        (navigator.clipboard ? navigator.clipboard.writeText(txt) : Promise.reject()).then(
+          () => { b.textContent = "Скопировано"; }, () => { b.textContent = "Не получилось скопировать"; });
+      }
+    });
+    if (p >= 80) sparks();
+  }
+  function shareText(t) {
+    const miss = t.mistakes.map(id => byId[id].ar + " (" + byId[id].ru + ")").join(", ");
+    return `${store.current} · Зачёт, ${testName(t)}: ${t.correct}/${t.total} (${pct(t.correct, t.total)}%)` + (miss ? `\nОшибки: ${miss}` : "\nБез ошибок!");
+  }
+  function sparks() {
+    const box = document.getElementById("donebox");
+    if (!box || (window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches)) return;
+    for (let k = 0; k < 18; k++) {
+      const s = document.createElement("i"), a = k / 18 * Math.PI * 2, r = 90 + Math.random() * 70;
+      s.className = "spark";
+      s.style.cssText = `left:50%;top:30%;--dx:${Math.cos(a) * r}px;--dy:${Math.sin(a) * r}px;animation-delay:${Math.random() * .15}s`;
+      box.appendChild(s);
+    }
+  }
+
+  // ── Профиль: коротко о прогрессе, зачёты и общая таблица ──
+  const streakOf = days => {
+    const d = new Set(days || []);
+    let n = today(); if (!d.has(n)) n--;
+    let k = 0; while (d.has(n)) { k++; n--; }
+    return k;
+  };
+  function profileScreen() {
+    screen = profileScreen;
+    currentBack = profileScreen;
+    const name = store.current.trim(), tg = todayGroup();
+    const open = WORDS.filter(w => w.week <= tg.g.week).map(w => w.id);
+    const known = open.filter(id => status(id) === "known").length;
+    const learning = open.filter(id => status(id) === "learn").length;
+    const st = me().stat, tests = me().tests || [];
+    const acc = st && st.n ? pct(st.ok, st.n) : tests.length ? pct(tests.reduce((s, t) => s + t.correct, 0), tests.reduce((s, t) => s + t.total, 0)) : null;
+    const last = tests.length ? pct(tests[tests.length - 1].correct, tests[tests.length - 1].total) : null;
+    const taken = [];
+    tests.forEach(t => { const k = testKind(t) + ":" + testNum(t); if (!taken.includes(k)) taken.push(k); });
+    const C = 2 * Math.PI * 42, part = open.length ? known / open.length : 0, s = streak();
+    view(`
+      <div class="top">${backBtn("back")}<b>Профиль</b><span style="width:44px"></span></div>
+      <section class="tile me">
+        <div class="ring"><svg width="96" height="96" viewBox="0 0 96 96" aria-hidden="true"><defs><linearGradient id="rg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#F0B144"/><stop offset="1" stop-color="#E0703F"/></linearGradient></defs>
+          <circle cx="48" cy="48" r="42" fill="none" stroke="var(--soft)" stroke-width="9"/>
+          <circle cx="48" cy="48" r="42" fill="none" stroke="url(#rg)" stroke-width="9" stroke-linecap="round" stroke-dasharray="${C}" stroke-dashoffset="${C * (1 - part)}"/></svg>
+          <b>${known}<small>знаю из ${open.length}</small></b></div>
+        <div class="who"><b>${esc(name)}</b><span class="muted small">Неделя ${tg.g.week} · день ${tg.g.day}</span>${learning ? `<span class="chip learn">${stIcon("learn")}${learning} в «учу»</span>` : ""}</div>
+      </section>
+      <div class="stats">
+        <div class="tile stat"><b>${s}</b><span>${plural(s, "день", "дня", "дней").replace(/^\d+ /, "")} подряд</span></div>
+        <div class="tile stat"><b>${acc != null ? acc + "%" : "—"}</b><span>точность</span></div>
+        <div class="tile stat"><b>${last != null ? last + "%" : "—"}</b><span>последний зачёт</span></div>
+      </div>
+      ${taken.length ? `<div class="tchips">${taken.map(k => { const [kind, n] = k.split(":"); return `<button data-act="retake" data-k="${k}" aria-label="Пересдать: ${esc(TEST_KINDS[kind].name(+n))}">${esc(TEST_KINDS[kind].name(+n))} · ${bestScore(tests, kind, +n)}%</button>`; }).join("")}</div>` : ""}
+      ${CLOUD ? `<section class="tile sec"><div class="secthead" style="padding:0"><b>Общая таблица</b></div><div id="board"><p class="muted small">Загружаю…</p></div></section>` : ""}
+      <section class="tile menu">
+        <button data-act="theme"><span>Тема</span><span>${isDark() ? "тёмная" : "светлая"}</span></button>
+        <button data-act="hacks"><span>Лайфхаки: закономерности</span><span>→</span></button>
+        <button data-act="switch"><span>Сменить профиль</span><span>${esc(name)}</span></button>
+        ${CLOUD ? "" : `<button data-act="backup"><span>Резервная копия</span><span>→</span></button>`}
+      </section>
+    `, "profile", {
+      back: home,
+      retake: b => { const [kind, n] = b.dataset.k.split(":"); testIntro(kind, +n); },
+      theme: () => { toggleTheme(); profileScreen(); },
+      hacks,
+      switch: () => profileModal(false),
+      backup: backupModal
+    });
+    loadBoard();
+  }
+
+  // На телефоне помещаются четыре столбца: имя, слов, серия и последний недельный зачёт.
+  function loadBoard() {
+    const el = document.getElementById("board");
+    if (!el || !CLOUD) return;
+    if (!db) { el.innerHTML = `<p class="muted small">${cloud === "failed" ? "Нет связи с базой. Таблица появится, когда будет интернет." : "Загружаю…"}</p>`; return; }
+    db.collection("users").get().then(snap => {
+      if (!document.body.contains(el)) return;
+      // Свою строку берём из памяти: запись в базу уходит с небольшой задержкой.
+      const rows = snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(r => r.id !== uid);
+      if (me()) rows.push({ id: uid, ...me() });
+      const wk = weeks[weeks.length - 1];
+      const count = r => Object.keys(r.words || {}).length;
+      rows.sort((a, b) => count(b) - count(a) || streakOf(b.days) - streakOf(a.days));
+      el.innerHTML = `<table class="board">
+        <thead><tr><th>Имя</th><th>Слов</th><th>Серия</th><th>Зачёт ${wk}</th></tr></thead>
+        <tbody>${rows.map((r, k) => {
+          const best = (r.tests || []).filter(t => testKind(t) === "week" && testNum(t) === wk).reduce((m, t) => Math.max(m, pct(t.correct, t.total)), -1);
+          return `<tr class="${r.id === uid ? "mine" : ""}"><td><span class="nm"><span class="pl">${k + 1}</span><span>${esc(r.name || "—")}</span></span></td><td>${count(r)}</td><td>${streakOf(r.days)}</td><td>${best >= 0 ? best + "%" : "—"}</td></tr>`;
+        }).join("")}</tbody></table>`;
+    }).catch(() => { el.innerHTML = `<p class="muted small">Таблица не загрузилась. Проверь интернет.</p>`; });
+  }
+
+  // ── Лайфхаки ──
+  function hacks() {
+    screen = hacks;
+    currentBack = hacks;
+    view(`
+      <div class="top">${backBtn("back")}<b>Лайфхаки</b><span style="width:44px"></span></div>
+      <p class="muted" style="padding:0 4px">Одна модель слова — один смысл. Узнал модель, и новое слово наполовину понятно.</p>
+      ${PATTERNS.map(p => `<section class="tile hack">
+        <span class="wz ar">${p.wazn}</span>
+        <b>${esc(p.meaning)}</b>
+        <div class="ws">${p.ids.filter(id => byId[id]).map(id => `<button class="w ar" data-word="${id}">${byId[id].ar}</button>`).join("")}</div>
+      </section>`).join("") || `<p class="muted">Пока пусто.</p>`}
+    `, "hacks", { back: profileScreen });
+  }
+
+  // ── Тема ──
+  function isDark() {
+    const t = document.documentElement.getAttribute("data-theme");
+    return t ? t === "dark" : !!(window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches);
+  }
+  function paintThemeColor() {
+    const bg = getComputedStyle(document.documentElement).getPropertyValue("--bg-solid").trim();
+    document.querySelectorAll('meta[name="theme-color"]').forEach(m => { m.content = bg; m.removeAttribute("media"); });
+  }
+  function toggleTheme() {
+    const t = isDark() ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", t);
+    try { localStorage.setItem("kalimat.theme", t); } catch (e) {}
+    paintThemeColor();
+  }
+  paintThemeColor();
+
+  // Какие прошлые недели развёрнуты на главной.
+  const UI_KEY = "kalimat.ui";
+  let ui = {};
+  try { ui = JSON.parse(localStorage.getItem(UI_KEY)) || {}; } catch (e) {}
+  ui.open = ui.open || {};
+  const saveUi = () => { try { localStorage.setItem(UI_KEY, JSON.stringify(ui)); } catch (e) {} };
 
   // ── Окна ──
   // Закрываются по Esc и тапу по затемнению, если не обязательные (первый вход).
@@ -230,75 +961,6 @@
     if (c) c.onclick = m.close;
   }
 
-  // ── Тема и состояние экрана ──
-  const MOON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/></svg>';
-  const SUN = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>';
-  const BULB = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2.1h5c0-.9.4-1.6 1-2.1A6 6 0 0 0 12 3z"/></svg>';
-  const CHEV = '<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>';
-  function isDark() {
-    const t = document.documentElement.getAttribute("data-theme");
-    return t ? t === "dark" : !!(window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches);
-  }
-  function paintThemeColor() {
-    const bg = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();
-    document.querySelectorAll('meta[name="theme-color"]').forEach(m => { m.content = bg; m.removeAttribute("media"); });
-  }
-  function toggleTheme() {
-    const t = isDark() ? "light" : "dark";
-    document.documentElement.setAttribute("data-theme", t);
-    try { localStorage.setItem("kalimat.theme", t); } catch (e) {}
-    paintThemeColor();
-    const b = document.getElementById("theme");
-    if (b) { b.innerHTML = isDark() ? SUN : MOON; b.setAttribute("aria-label", isDark() ? "Светлая тема" : "Тёмная тема"); }
-  }
-  paintThemeColor();
-
-  // Какие недели развёрнуты. По умолчанию открыта только последняя.
-  const UI_KEY = "kalimat.ui";
-  let ui = {};
-  try { ui = JSON.parse(localStorage.getItem(UI_KEY)) || {}; } catch (e) {}
-  ui.open = ui.open || {};
-  const saveUi = () => { try { localStorage.setItem(UI_KEY, JSON.stringify(ui)); } catch (e) {} };
-  const isOpen = key => key in ui.open ? ui.open[key] : key === "w" + weeks[weeks.length - 1];
-
-  function topBar() {
-    return `<div class="top">
-      <div class="brand"><h1>калимат</h1><span class="ar" aria-hidden="true">كَلِمَات</span></div>
-      <div class="tools">
-        <button class="btn ghost sm hacks" id="hacks" aria-label="Лайфхаки">${BULB}<span>Лайфхаки</span></button>
-        <button class="ibtn" id="theme" aria-label="${isDark() ? "Светлая тема" : "Тёмная тема"}">${isDark() ? SUN : MOON}</button>
-        <button class="ibtn me" id="prof" aria-label="Профиль: ${esc(store.current)}" title="${esc(store.current)}">${esc(store.current.trim().charAt(0).toUpperCase())}</button>
-      </div>
-    </div>`;
-  }
-  function bindTop() {
-    on("prof", () => profileModal(false));
-    on("theme", toggleTheme);
-    on("hacks", hacks);
-  }
-
-  // ── Общая таблица ──
-  // На телефоне помещаются четыре столбца: имя, слов, закреплено и последний недельный зачёт.
-  function loadBoard() {
-    const el = document.getElementById("board");
-    if (!el || !CLOUD) return;
-    if (!db) { el.innerHTML = `<p class="muted small">${cloud === "failed" ? "Нет связи с базой. Таблица появится, когда будет интернет." : "Загружаю…"}</p>`; return; }
-    db.collection("users").get().then(snap => {
-      // Свою строку берём из памяти: запись в базу уходит с небольшой задержкой.
-      const rows = snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(r => r.id !== uid);
-      if (me()) rows.push({ id: uid, ...me() });
-      const wk = weeks[weeks.length - 1];
-      rows.sort((a, b) => strong(b) - strong(a) || Object.keys(b.words || {}).length - Object.keys(a.words || {}).length);
-      el.innerHTML = `<table class="board">
-        <thead><tr><th>Имя</th><th>Слов</th><th>Закреп&shy;лено</th><th>Зачёт ${wk}</th></tr></thead>
-        <tbody>${rows.map(r => {
-          const best = (r.tests || []).filter(t => testKind(t) === "week" && testNum(t) === wk).reduce((m, t) => Math.max(m, pct(t.correct, t.total)), -1);
-          return `<tr class="${r.id === uid ? "mine" : ""}"><td><span class="nm">${esc(r.name || "—")}</span></td><td>${Object.keys(r.words || {}).length}</td><td>${strong(r)}</td><td>${best >= 0 ? best + "%" : "—"}</td></tr>`;
-        }).join("")}</tbody></table>
-        <p class="muted small">«Закреплено» — слова, которые прошли повтор через 2 недели и дальше.</p>`;
-    }).catch(() => { el.innerHTML = `<p class="muted small">Таблица не загрузилась. Проверь интернет.</p>`; });
-  }
-  const strong = r => Object.values(r.words || {}).filter(s => s.stage >= 3).length;
 
   // ── Серия дней ──
   // Дни, когда было занятие, хранятся номерами дней. Серия не рвётся, пока сегодняшний день не закончился.
@@ -315,101 +977,8 @@
     while (d.has(n)) { k++; n--; }
     return k;
   }
-  const WD = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
-  function weekDots() {
-    const t = today(), mon = t - (t + 3) % 7, d = new Set(me().days || []);
-    return `<div class="wdots" aria-label="Занятия на этой неделе">${WD.map((name, i) => {
-      const n = mon + i;
-      return `<span class="wd${d.has(n) ? " on" : ""}${n === t ? " now" : ""}"><i></i>${name}</span>`;
-    }).join("")}</div>`;
-  }
 
-  // ── Главная ──
-  function home() {
-    currentBack = home;
-    screen = home;
-    if (!store.current || !me()) {
-      app.innerHTML = `<div class="wrap">${topBarEmpty()}</div>`;
-      if (!document.querySelector(".modal")) profileModal(true);
-      return;
-    }
-    const due = dueIds();
-    const nd = nextDue();
-    const groups = [];
-    WORDS.forEach(w => { const k = dayKey(w); let g = groups.find(x => x.k === k); if (!g) groups.push(g = { k, week: w.week, day: w.day, ids: [] }); g.ids.push(w.id); });
-    const fresh = groups.find(g => g.ids.some(id => !me().words[id]));
-    const tests = me().tests || [];
-    const nRev = Math.min(due.length, REVIEW_LIMIT);
-    const mins = Math.max(1, Math.ceil(nRev / 3) + (fresh ? 2 : 0));
-    const st = streak();
-
-    app.innerHTML = `<div class="wrap">
-      ${topBar()}
-      ${cloud === "failed" ? `<p class="note">Нет связи с базой: прогресс сохраняется на телефоне и уйдёт в базу, когда появится интернет. <button class="link" id="retry">Повторить</button></p>` : ""}
-
-      <section class="today">
-        <div class="today-top">
-          <span class="label">Сегодня</span>
-          <span class="streak${st ? " on" : ""}">${st ? plural(st, "день", "дня", "дней") + " подряд" : "Начни серию"}</span>
-        </div>
-        ${weekDots()}
-        ${nRev || fresh ? `
-          <div class="plan">
-            ${nRev ? `<div class="plan-row"><span class="hero-num">${nRev}</span><span>${plural(nRev, "слово", "слова", "слов").replace(/^\d+ /, "")} на повтор${due.length > REVIEW_LIMIT ? `<span class="muted small"> · ещё ${due.length - REVIEW_LIMIT} завтра</span>` : ""}</span></div>` : ""}
-            ${fresh ? `<div class="plan-row"><span class="hero-num">${fresh.ids.filter(id => !me().words[id]).length}</span><span>новых · неделя ${fresh.week}, день ${fresh.day}</span></div>
-              <div class="ws">${fresh.ids.map(id => `<button class="w ar" data-word="${id}">${byId[id].ar}</button>`).join("")}</div>` : ""}
-          </div>
-          <button class="btn block" id="go">Начать · ~${plural(mins, "минута", "минуты", "минут")}</button>` : `
-          <h2 class="head">Всё сделано</h2>
-          <p class="muted">${nd ? "Следующий повтор: " + inDays(nd) + "." : "Новые слова появятся, когда их добавят в словарь."}</p>`}
-      </section>
-
-      <div class="weeks">
-        ${weeks.slice().reverse().map(wk => weekBlock(wk, groups.filter(g => g.week === wk), tests)).join("")}
-        <div class="legend">
-          <span><i class="dot"></i>не начато</span>
-          <span><i class="dot s1"></i>учу</span>
-          <span><i class="dot s3"></i>закрепляю</span>
-          <span><i class="dot s5"></i>надолго</span>
-          <span><i class="dot lapse"></i>забыл</span>
-        </div>
-      </div>
-
-      <section class="sec">
-        <span class="label">Зачёты</span>
-        ${bigTests().reverse().map(({ kind, n }) => testRow(kind, n, tests)).join("")}
-        ${weeks.slice().reverse().map(wk => testRow("week", wk, tests)).join("")}
-        ${bigTests().length ? "" : `<p class="muted small">Месячный зачёт по 4 неделям откроется после недели ${Math.ceil(((weeks[weeks.length - 1] || 0) + 1) / 4) * 4}, зачёт за 3 месяца — после недели 12.</p>`}
-        ${CLOUD ? "" : `<button class="btn ghost sm" id="backup">Резервная копия</button>`}
-      </section>
-
-      ${CLOUD ? `<div class="week" data-open="${isOpen("board")}">
-        <div class="wk-head"><button class="wk-toggle" data-fold="board" aria-expanded="${isOpen("board")}">${CHEV}<span><h3>Общая таблица</h3></span></button></div>
-        <div class="wk-body" id="board"><p class="muted small">Загружаю…</p></div>
-      </div>` : ""}
-    </div>`;
-
-    bindTop();
-    on("go", () => due.length ? startReview(fresh ? fresh.k : null) : learnDay(fresh.k));
-    on("retry", connect);
-    on("backup", backupModal);
-    if (isOpen("board")) loadBoard();
-    app.querySelectorAll("[data-test]").forEach(b => b.onclick = () => { const [k, n] = b.dataset.test.split(":"); startTest(k, +n); });
-    app.querySelectorAll("[data-fold]").forEach(b => b.onclick = () => {
-      const key = b.dataset.fold, box = b.closest(".week"), open = !isOpen(key);
-      ui.open[key] = open; saveUi();
-      box.dataset.open = open; b.setAttribute("aria-expanded", open);
-      if (key === "board" && open) loadBoard();
-    });
-    app.querySelectorAll("[data-markweek]").forEach(b => b.onclick = () => {
-      const wk = +b.dataset.markweek;
-      if (!confirm(`Отметить все слова недели ${wk} как знакомые? Они сразу пойдут в повторение, отменить это нельзя.`)) return;
-      WORDS.filter(w => w.week === wk && !me().words[w.id]).forEach(w => { learn(w.id, 1); me().words[w.id].due = today() + 1; });
-      save(); home();
-    });
-    window.scrollTo(0, 0);
-  }
-  function topBarEmpty() { return `<div class="top"><div class="brand"><h1>калимат</h1><span class="ar" aria-hidden="true">كَلِمَات</span></div></div>`; }
+  // ── Общие мелочи ──
   const on = (id, fn) => { const el = document.getElementById(id); if (el) el.onclick = fn; };
   const pct = (a, b) => b ? Math.round(a / b * 100) : 0;
   function plural(n, one, few, many) {
@@ -429,434 +998,8 @@
   function bestScore(tests, kind, n) {
     return tests.filter(t => testKind(t) === kind && testNum(t) === n).reduce((b, t) => Math.max(b, pct(t.correct, t.total)), -1);
   }
-  // Большой зачёт открывается, когда все его недели уже в словаре.
-  function bigTests() {
-    const last = weeks.length ? weeks[weeks.length - 1] : 0;
-    const list = [];
-    ["month", "quarter"].forEach(kind => {
-      for (let n = 1; n * TEST_KINDS[kind].weeks <= last; n++) list.push({ kind, n });
-    });
-    return list;
-  }
 
-  function weekBlock(wk, groups, tests) {
-    const ids = groups.flatMap(g => g.ids);
-    const learned = ids.filter(id => me().words[id]).length;
-    const best = bestScore(tests, "week", wk);
-    const key = "w" + wk;
-    // Зачёт сдаётся из раздела «Зачёты», здесь только результат.
-    return `<div class="week" data-open="${isOpen(key)}">
-      <div class="wk-head">
-        <button class="wk-toggle" data-fold="${key}" aria-expanded="${isOpen(key)}">${CHEV}<span><h3>Неделя ${wk}</h3>
-          <span class="wk-meta">${learned} из ${ids.length}${best >= 0 ? ` · зачёт <b>${best}%</b>` : ""}</span></span></button>
-      </div>
-      <div class="wk-body">
-        ${groups.map(g => `<div class="wk-day"><span class="dn">${g.day}</span>
-          <div class="wgrid">${g.ids.map(id => `<button class="wcell" data-word="${id}"><span class="ar">${byId[id].ar}</span><span class="wru"><i class="${dotClass(id)}"></i>${esc(byId[id].ru)}</span></button>`).join("")}</div></div>`).join("")}
-        ${learned < ids.length ? `<button class="link small" data-markweek="${wk}">Я уже знаю слова этой недели</button>` : ""}
-      </div>
-    </div>`;
-  }
 
-  function testRow(kind, n, tests) {
-    const done = tests.filter(t => testKind(t) === kind && testNum(t) === n);
-    const best = bestScore(tests, kind, n);
-    const last = done[done.length - 1];
-    const ws = testWeeks(kind, n);
-    const name = TEST_KINDS[kind].name(n);
-    return `<div class="trow">
-      <span>${esc(name[0].toUpperCase() + name.slice(1))}${kind === "week" ? "" : ` <span class="muted small">· недели ${ws[0]}–${ws[ws.length - 1]}</span>`}<span class="when">${last ? fmtDay(last.date) + " · " + plural(done.length, "попытка", "попытки", "попыток") : "ещё не сдан"}</span></span>
-      <span class="pct">${best >= 0 ? best + "%" : "—"}</span>
-      <button class="btn ghost sm" data-test="${kind}:${n}">${done.length ? "Пересдать" : "Сдать"}</button>
-    </div>`;
-  }
-
-  // ── Лайфхаки ──
-  function hacks() {
-    currentBack = hacks;
-    screen = hacks;
-    app.innerHTML = `<div class="wrap">
-      <div class="top"><button class="btn ghost sm" id="back">← На главную</button></div>
-      <section class="sec">
-        <span class="label">Лайфхаки · закономерности</span>
-        <p class="muted">Одна модель слова — один смысл. Узнал модель, и новое слово наполовину понятно.</p>
-      </section>
-      ${PATTERNS.map(p => `<section class="hack">
-        <span class="wz ar">${p.wazn}</span>
-        <strong>${esc(p.meaning)}</strong>
-        <div class="ws">${p.ids.filter(id => byId[id]).map(id => `<button class="w ar" data-word="${id}">${byId[id].ar}</button>`).join("")}</div>
-      </section>`).join("") || `<p class="muted">Пока пусто.</p>`}
-    </div>`;
-    on("back", home);
-    window.scrollTo(0, 0);
-  }
-
-  // ── Карточка слова ──
-  // Закрытая карточка показывает только слово: сначала вспомни, потом тап раскрывает остальное.
-  function ayahHtml(q) {
-    const words = q.ar.split(" ");
-    const mark = (ws, at) => ws.map((x, i) => i === at ? `<mark>${x}</mark>` : x).join(" ");
-    const from = Math.max(0, q.hl - 3), to = Math.min(words.length, q.hl + 4);
-    const frag = (from > 0 ? "… " : "") + mark(words.slice(from, to), q.hl - from) + (to < words.length ? " …" : "");
-    return `<details class="ayah">
-      <summary><span class="ar">${frag}</span><span class="small muted">${esc(q.ref)} · <span class="more">весь аят</span><span class="less">свернуть</span></span></summary>
-      <p class="ar">${mark(words, q.hl)}</p><p>${esc(q.ru)}</p>
-    </details>`;
-  }
-  // Русский текст с арабскими вставками: каждую вставку изолируем, чтобы стрелки и тире не путали порядок.
-  const rich = t => esc(t).replace(/[\u0600-\u06FF](?:[\u0600-\u06FF\s–-]*[\u0600-\u06FF])?/g, m => `<bdi class="ar">${m}</bdi>`);
-  const pairs = list => list.map(p => `<div class="phr"><span class="ar">${p[0]}</span><span>${esc(p[1])}</span></div>`).join("");
-
-  function cardHtml(w, open) {
-    const quran = w.quran || [];
-    return `<section class="panel wcard${open ? " open" : ""}">
-      <button class="card-hero" data-reveal aria-expanded="${open ? "true" : "false"}">
-        <span class="ar">${w.ar}</span>
-        <span class="hint muted small">Вспомни перевод и нажми</span>
-      </button>
-      <div class="card-body">
-        <div class="tr">${esc(w.ru)}</div>
-        ${w.photo ? `<figure class="photo"><img src="${w.photo.src}" alt="${esc(w.ru)}" decoding="async"><figcaption>Фото: ${esc(w.photo.credit)}</figcaption></figure>` : ""}
-        <div class="kv">
-          <span class="label">Корень</span>
-          <div class="roots">${w.root.map(l => `<span class="root-l">${l}</span>`).join("")}</div>
-          <p class="center">${esc(w.rootMeaning)}</p>
-        </div>
-        <div class="kv"><span class="label">Как запомнить</span>${[].concat(w.assoc).map(a => `<p>${rich(a)}</p>`).join("")}</div>
-        <div class="kv"><span class="label">Словосочетания</span>${pairs(w.phrases)}</div>
-        <details>
-          <summary>${CHEV}Подробнее</summary>
-          <div class="kv more-body">
-            <div class="kv"><span class="label">Как образовано</span><p>${rich(w.pattern)}</p></div>
-            ${w.plural ? `<div class="kv"><span class="label">Множественное число</span><p class="ar plural">${w.plural}</p></div>` : ""}
-            ${w.related && w.related.length ? `<div class="kv"><span class="label">Однокоренные слова</span>${pairs(w.related)}</div>` : ""}
-            ${w.examples && w.examples.length ? `<div class="kv"><span class="label">Примеры из жизни</span>${w.examples.map(p => `<div class="ex"><p class="ar">${p[0]}</p><p class="muted">${esc(p[1])}</p></div>`).join("")}</div>` : ""}
-            ${w.facts && w.facts.length ? `<div class="kv"><span class="label">Интересно</span><ul class="facts">${w.facts.map(f => `<li>${rich(f)}</li>`).join("")}</ul></div>` : ""}
-            <div class="kv"><span class="label">В Коране</span>
-              ${quran.map(ayahHtml).join("")}
-              ${w.qnote ? `<p class="small muted">${rich(w.qnote)}</p>` : ""}
-            </div>
-          </div>
-        </details>
-      </div>
-    </section>`;
-  }
-
-  const STAGE = s => !s ? "не начато" : s.lapse ? "забыл" : s.stage >= DONE ? "надолго" : s.stage >= 3 ? "закрепляю" : "учу";
-  function showWord(id, back) {
-    const w = byId[id]; if (!w) return;
-    const s = me().words[id];
-    screen = showWord;
-    app.innerHTML = `<div class="wrap">
-      <div class="top"><button class="btn ghost sm" id="back">← Назад</button><span class="muted small">Неделя ${w.week}, день ${w.day}</span></div>
-      <p class="stage"><i class="${dotClass(id)}"></i>${STAGE(s)}${s ? ` · следующий повтор: ${inDays(s.due)}` : ""}</p>
-      ${cardHtml(w)}
-    </div>`;
-    on("back", () => (back || home)());
-    window.scrollTo(0, 0);
-  }
-
-  // ── Изучение дня ──
-  function learnDay(k) {
-    const ids = WORDS.filter(w => dayKey(w) === k).map(w => w.id);
-    const w0 = byId[ids[0]];
-    currentBack = () => learnDay(k);
-    screen = learnDay;
-    app.innerHTML = `<div class="wrap">
-      <div class="top"><button class="btn ghost sm" id="back">← Назад</button><span class="muted small">Неделя ${w0.week}, день ${w0.day}</span></div>
-      <p class="muted">Вспомни перевод, открой карточку и прочитай её. Потом закрепи коротким упражнением.</p>
-      ${ids.map(id => cardHtml(byId[id], !me().words[id])).join("")}
-      <button class="btn block" id="drill">Закрепить · 1 минута</button>
-      <button class="link" id="mark">Отметить выученными без упражнения</button>
-    </div>`;
-    on("back", home);
-    on("mark", () => { ids.forEach(id => { if (!me().words[id]) learn(id, 0); }); markDay(); save(); home(); });
-    on("drill", () => {
-      const tasks = shuffle(ids.map(id => ({ type: "ar2ru", id }))).concat(shuffle(ids.map(id => ({ type: "ru2ar", id }))));
-      runSession({
-        title: "Новые слова", tasks,
-        finish: res => {
-          ids.forEach(id => { if (!me().words[id]) learn(id, 0); });
-          markDay(); save();
-          resultScreen({ title: "Слова добавлены в повторение", res, note: "Первый повтор через 2 дня." });
-        }
-      });
-    });
-    window.scrollTo(0, 0);
-  }
-
-  // ── Повторение ──
-  // nextK — день с новыми словами: после повторения предложим перейти к нему.
-  function startReview(nextK) {
-    const ids = shuffle(dueIds().slice(0, REVIEW_LIMIT));
-    const tasks = ids.map(id => {
-      const st = me().words[id].stage;
-      const types = st < 2 ? ["ar2ru", "ru2ar", "cloze", "flip"] : ["ru2ar", "cloze", "build", "type"];
-      return { type: pick(types), id };
-    });
-    runSession({
-      title: "Повторение", tasks,
-      finish: res => {
-        const agg = aggregate(res);
-        Object.entries(agg).forEach(([id, ok]) => grade(id, ok));
-        markDay(); save();
-        const left = dueIds().length;
-        const more = nextK && WORDS.some(w => dayKey(w) === nextK && !me().words[w.id]);
-        resultScreen({ title: "Повторение готово", res, note: "Слова с ошибками вернутся завтра." + (left ? " Ещё " + plural(left, "слово ждёт", "слова ждут", "слов ждут") + " — можно завтра." : ""),
-          next: more ? { label: "Дальше: новые слова", fn: () => learnDay(nextK) } : null });
-      }
-    });
-  }
-
-  // ── Зачёт ──
-  // Каждое слово один раз: две трети заданий «вспомни сам», треть — узнавание, в конце пары.
-  function testIds(kind, n) {
-    const wks = testWeeks(kind, n);
-    const ids = WORDS.filter(w => wks.includes(w.week)).map(w => w.id);
-    const size = TEST_KINDS[kind].size;
-    if (ids.length <= size) return ids;
-    // В большой зачёт сначала попадают слова, которые забывались, остальные — случайно.
-    const weak = shuffle(ids).sort((a, b) => ((me().words[b] || {}).lapses || 0) - ((me().words[a] || {}).lapses || 0));
-    return weak.slice(0, size);
-  }
-  function startTest(kind, n) {
-    const ids = shuffle(testIds(kind, n));
-    const recog = ["ar2ru", "cloze"];
-    const prod = ["ru2ar", "build", "type"];
-    const tasks = ids.map((id, i) => ({ type: pick(i % 3 === 2 ? recog : prod), id }));
-    if (ids.length >= 4) tasks.push({ type: "match", ids: shuffle(ids).slice(0, 5) });
-    const spec = TEST_KINDS[kind];
-    const title = "Зачёт, " + spec.name(n);
-    runSession({
-      title, tasks,
-      finish: res => {
-        const agg = aggregate(res);
-        Object.entries(agg).forEach(([id, ok]) => gradeTest(id, ok, spec.stage));
-        const correct = res.filter(r => r.ok).length;
-        const mistakes = Object.keys(agg).filter(id => !agg[id]);
-        const t = { kind, n, date: today(), correct, total: res.length, mistakes };
-        if (kind === "week") t.week = n;
-        me().tests = me().tests || [];
-        me().tests.push(t);
-        markDay(); save();
-        resultScreen({ title, res, test: t,
-          note: `Следующий повтор этих слов через ${spec.stage === 2 ? "2 недели" : spec.stage === 3 ? "месяц" : "3 месяца"}. Слова с ошибками вернутся завтра. Зачёт можно пересдать в любой момент.` });
-      }
-    });
-  }
-
-  function aggregate(res) {
-    const agg = {};
-    res.forEach(r => { agg[r.id] = (agg[r.id] !== undefined ? agg[r.id] : true) && r.ok; });
-    return agg;
-  }
-
-  // ── Движок упражнений ──
-  // Ошибку повторяем один раз в конце занятия («работа над ошибками»). В оценку идёт только первая попытка.
-  // Счётчик считает основные задания отдельно, чтобы полоска не откатывалась назад.
-  function runSession({ title, tasks, finish }) {
-    if (!tasks.length) return home();
-    tasks = tasks.slice();
-    const main = tasks.length;
-    let i = 0;
-    const res = [];
-    const next = () => { i++; if (i >= tasks.length) finish(res); else show(); };
-    const again = (t, results) => {
-      results.filter(r => !r.ok).forEach(r => tasks.push({ type: t.type === "match" ? "ar2ru" : t.type, id: r.id, retry: true }));
-    };
-    function show() {
-      const t = tasks[i];
-      screen = runSession;
-      const retry = i >= main;
-      const count = retry ? `Работа над ошибками · ${i - main + 1}/${tasks.length - main}` : `${esc(title)} · ${i + 1}/${main}`;
-      const prog = retry ? (i - main) / (tasks.length - main) : i / main;
-      app.innerHTML = `<div class="wrap">
-        <div class="top"><button class="btn ghost sm" id="quit">✕ Выйти</button><span class="muted small">${count}</span></div>
-        <div class="progress${retry ? " retry" : ""}"><i style="width:${prog * 100}%"></i></div>
-        <div id="task" class="panel"></div>
-        <div id="fb" aria-live="polite"></div>
-      </div>`;
-      on("quit", () => { if (i === 0 || confirm("Выйти? Ответы этого занятия не сохранятся.")) home(); });
-      const box = document.getElementById("task");
-      const done = (results, answerHtml, typedHtml) => {
-        if (!t.retry) { results.forEach(r => res.push(r)); again(t, results); }
-        const ok = results.every(r => r.ok);
-        if (!ok && navigator.vibrate) { try { navigator.vibrate(60); } catch (e) {} }
-        const fb = document.getElementById("fb");
-        fb.innerHTML = `<div class="feedback ${ok ? "ok" : "no"}">
-          <div>${ok ? "Верно" + (answerHtml ? ": " : "") : "Правильно: "}${answerHtml || ""}${typedHtml ? `<div class="typed">Ты написал: ${typedHtml}</div>` : ""}</div>
-          <button class="btn block" id="nx">Дальше</button></div>`;
-        const nx = document.getElementById("nx");
-        nx.onclick = next;
-        try { nx.focus({ preventScroll: true, focusVisible: false }); } catch (e) { nx.focus(); }
-        fb.scrollIntoView({ block: "nearest", behavior: "smooth" });
-      };
-      TASKS[t.type](box, t, done);
-      window.scrollTo(0, 0);
-    }
-    show();
-  }
-
-  // В заданиях и в списке ошибок — фото слова (если есть), иначе эмодзи.
-  const pic = (w, cls = "qpic") => w.photo && w.photo.src
-    ? `<img class="${cls}" src="${esc(w.photo.src)}" alt="" decoding="async">`
-    : `<span class="${cls} emo">${w.emoji || ""}</span>`;
-  const ansAr = w => `<span class="ar">${w.ar}</span> — ${esc(w.ru)}`;
-
-  function choice(box, prompt, options, correctId, isAr, onPick) {
-    box.innerHTML = prompt + `<div class="opts">${options.map(o => `<button class="opt ${isAr ? "ar" : ""}" data-o="${o.id}">${isAr ? o.ar : esc(o.ru)}</button>`).join("")}</div>`;
-    const btns = [...box.querySelectorAll("[data-o]")];
-    btns.forEach(b => b.onclick = () => {
-      btns.forEach(x => { x.disabled = true; if (x.dataset.o === correctId) x.classList.add("ok"); });
-      if (b.dataset.o !== correctId) b.classList.add("no");
-      onPick(b.dataset.o === correctId);
-    });
-  }
-
-  const TASKS = {
-    ar2ru(box, t, done) {
-      const w = byId[t.id];
-      const opts = shuffle([w, ...distractors(t.id)]);
-      choice(box, `<span class="label">Что значит слово?</span><div class="q"><div class="ar">${w.ar}</div></div>`, opts, w.id, false,
-        ok => { done([{ id: w.id, ok }], ansAr(w)); });
-    },
-    ru2ar(box, t, done) {
-      const w = byId[t.id];
-      const opts = shuffle([w, ...distractors(t.id)]);
-      choice(box, `<span class="label">Выбери арабское слово</span><div class="q">${pic(w)}<div class="tr">${esc(w.ru)}</div></div>`, opts, w.id, true,
-        ok => { done([{ id: w.id, ok }], ansAr(w)); });
-    },
-    cloze(box, t, done) {
-      const w = byId[t.id];
-      const opts = shuffle([w, ...distractors(t.id)]);
-      const sent = w.cloze.ar.replace("___", `<span class="blank">&nbsp;</span>`);
-      choice(box, `<span class="label">Какое слово подходит?</span><div class="q"><p class="ar sent">${sent}</p></div>`, opts, w.id, true,
-        ok => done([{ id: w.id, ok }], `<span class="ar">${w.cloze.ar.replace("___", w.ar)}</span><br><span class="small">${esc(w.cloze.ru)}</span>`));
-    },
-    flip(box, t, done) {
-      const w = byId[t.id];
-      box.innerHTML = `<span class="label">Вспомни перевод, потом открой</span>
-        <button class="flip" id="fl"><span class="q"><span class="ar">${w.ar}</span><span class="muted">Нажми, чтобы проверить</span></span></button>`;
-      document.getElementById("fl").onclick = () => {
-        box.innerHTML = `<span class="label">Ты вспомнил?</span>
-          <div class="q"><div class="ar">${w.ar}</div><div class="tr">${esc(w.ru)}</div></div>
-          <div class="row"><button class="btn ghost" id="no">Не вспомнил</button><button class="btn" id="yes">Вспомнил</button></div>`;
-        on("yes", () => { box.querySelectorAll("button").forEach(b => b.disabled = true); done([{ id: w.id, ok: true }], ""); });
-        on("no", () => { box.querySelectorAll("button").forEach(b => b.disabled = true); done([{ id: w.id, ok: false }], ansAr(w)); });
-      };
-    },
-    build(box, t, done) {
-      const w = byId[t.id];
-      const letters = Array.from(strip(w.ar));
-      const extra = shuffle(Array.from(new Set(distractors(t.id, 4).flatMap(x => Array.from(strip(x.ar))))).filter(l => !letters.includes(l))).slice(0, 2);
-      const tiles = shuffle(letters.concat(extra));
-      let used = [];
-      box.innerHTML = `<span class="label">Собери слово из букв</span>
-        <div class="q">${pic(w)}<div class="tr">${esc(w.ru)}</div></div>
-        <button class="built" id="built" aria-label="Собранное слово, нажми чтобы стереть букву">&nbsp;</button>
-        <div class="tiles">${tiles.map((l, k) => `<button class="tile" data-k="${k}">${l}</button>`).join("")}</div>
-        <div class="row"><button class="btn ghost" id="bs">⌫ Стереть</button><button class="btn" id="chk">Проверить</button></div>`;
-      const built = document.getElementById("built");
-      const tileBtns = [...box.querySelectorAll(".tile")];
-      const draw = () => { built.textContent = used.map(k => tiles[k]).join("") || " "; tileBtns.forEach(b => b.disabled = used.includes(+b.dataset.k)); };
-      tileBtns.forEach(b => b.onclick = () => { used.push(+b.dataset.k); draw(); });
-      on("bs", () => { used.pop(); draw(); });
-      built.onclick = () => { used.pop(); draw(); };
-      on("chk", () => {
-        const ok = norm(used.map(k => tiles[k]).join("")) === norm(w.ar);
-        box.querySelectorAll("button").forEach(b => b.disabled = true);
-        done([{ id: w.id, ok }], ansAr(w));
-      });
-    },
-    type(box, t, done) {
-      const w = byId[t.id];
-      box.innerHTML = `<span class="label">Напиши по-арабски</span>
-        <div class="q">${pic(w)}<div class="tr">${esc(w.ru)}</div></div>
-        <form id="tf" class="kv tform">
-          <input id="tin" class="input-ar" lang="ar" dir="rtl" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Нажми и напиши">
-          <p class="muted small">Огласовки можно не ставить. Подойдёт арабская клавиатура или голосовой ввод на арабском.</p>
-          <div class="row"><button class="btn ghost" type="button" id="idk">Не знаю</button><button class="btn" type="submit">Проверить</button></div>
-        </form>`;
-      const inp = document.getElementById("tin");
-      const finish = (ok, typed) => {
-        box.querySelectorAll("button, input").forEach(b => b.disabled = true);
-        done([{ id: w.id, ok }], ansAr(w), !ok && typed ? `<bdi class="ar">${esc(typed)}</bdi>` : "");
-      };
-      document.getElementById("tf").onsubmit = e => { e.preventDefault(); const v = inp.value.trim(); if (v) finish(norm(v) === norm(w.ar), v); };
-      on("idk", () => finish(false));
-      // На телефоне клавиатура не выезжает сама, чтобы не закрывать фото и кнопки.
-      if (!matchMedia("(pointer: coarse)").matches) inp.focus();
-    },
-    match(box, t, done) {
-      const ws = t.ids.map(id => byId[id]);
-      const left = shuffle(ws), right = shuffle(ws);
-      const errs = {};
-      let sel = null, left_ = ws.length;
-      box.innerHTML = `<span class="label">Соедини пары</span>
-        <p class="muted small">Нажми арабское слово, потом его перевод.</p>
-        <div class="match"><div class="col">${left.map(w => `<button class="opt ar" data-l="${w.id}">${w.ar}</button>`).join("")}</div>
-        <div class="col">${right.map(w => `<button class="opt" data-r="${w.id}">${esc(w.ru)}</button>`).join("")}</div></div>`;
-      const L = [...box.querySelectorAll("[data-l]")], R = [...box.querySelectorAll("[data-r]")];
-      L.forEach(b => b.onclick = () => { L.forEach(x => x.classList.remove("sel")); b.classList.add("sel"); sel = b.dataset.l; });
-      R.forEach(b => b.onclick = () => {
-        if (!sel) return;
-        if (b.dataset.r === sel) {
-          [b, box.querySelector(`[data-l="${sel}"]`)].forEach(x => { x.classList.remove("sel"); x.classList.add("done"); x.disabled = true; });
-          sel = null; left_--;
-          if (left_ === 0) done(ws.map(w => ({ id: w.id, ok: !errs[w.id] })), Object.keys(errs).map(id => ansAr(byId[id])).join("<br>"));
-        } else {
-          errs[sel] = true;
-          b.classList.add("no"); setTimeout(() => b.classList.remove("no"), 500);
-        }
-      });
-    }
-  };
-
-  // ── Результат ──
-  // practice — тренировка ошибок: результат не идёт в повторы.
-  function resultScreen({ title, res, note, test, next, practice }) {
-    const correct = res.filter(r => r.ok).length;
-    const agg = aggregate(res);
-    const bad = Object.keys(agg).filter(id => !agg[id]);
-    const p = pct(correct, res.length);
-    const great = p >= 80;
-    screen = resultScreen;
-    app.innerHTML = `<div class="wrap">
-      <section class="panel${great ? " great" : ""}">
-        <div class="score"><span class="label">${esc(title)}</span>
-          ${great ? `<p class="cheer">${p === 100 ? "Без единой ошибки!" : "Отлично!"}</p>` : ""}
-          <div class="bignum">${p}%</div><p>${correct} из ${res.length} заданий верно</p></div>
-        ${note ? `<p class="muted small">${esc(note)}</p>` : ""}
-      </section>
-      ${next ? `<button class="btn block" id="next">${esc(next.label)}</button>` : ""}
-      ${bad.length ? `<button class="btn ${next ? "ghost" : ""} block" id="fix">Повторить ошибки сейчас · ${plural(bad.length, "слово", "слова", "слов")}</button>` : ""}
-      ${bad.length ? `<section class="panel"><span class="label">${practice ? "Ещё путаются" : "Ошибки"}</span>
-        ${bad.map(id => `<button class="mist" data-word="${id}">${pic(byId[id], "mpic")}<span>${esc(byId[id].ru)}</span><span class="ar">${byId[id].ar}</span></button>`).join("")}
-      </section>` : ""}
-      ${test ? `<button class="btn ghost block" id="share">${navigator.share ? "Поделиться результатом" : "Скопировать результат"}</button>` : ""}
-      <button class="btn ${next || bad.length ? "ghost" : ""} block" id="home">На главную</button>
-    </div>`;
-    currentBack = () => resultScreen({ title, res, note, test, next, practice });
-    on("home", home);
-    if (next) on("next", next.fn);
-    on("fix", () => {
-      const tasks = shuffle(bad.map(id => ({ type: pick(["ar2ru", "ru2ar"]), id })));
-      runSession({ title: "Работа над ошибками", tasks,
-        finish: r => resultScreen({ title: "Работа над ошибками", res: r, practice: true, note: "Это тренировка: расписание повторов не меняется." }) });
-    });
-    on("share", () => {
-      const txt = shareText(test), btn = document.getElementById("share");
-      if (navigator.share) { navigator.share({ text: txt }).catch(() => {}); return; }
-      (navigator.clipboard ? navigator.clipboard.writeText(txt) : Promise.reject()).then(
-        () => { btn.textContent = "Скопировано"; },
-        () => { btn.textContent = "Не получилось скопировать"; });
-    });
-    window.scrollTo(0, 0);
-  }
-  function shareText(t) {
-    const miss = t.mistakes.map(id => byId[id].ar + " (" + byId[id].ru + ")").join(", ");
-    return `${store.current} · Зачёт, ${testName(t)}: ${t.correct}/${t.total} (${pct(t.correct, t.total)}%)` + (miss ? `\nОшибки: ${miss}` : "\nБез ошибок!");
-  }
 
   // ── Резервная копия ──
   function backupModal() {
