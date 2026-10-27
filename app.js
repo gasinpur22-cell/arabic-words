@@ -49,6 +49,8 @@
   if (CLOUD) {
     firebase.initializeApp(window.FIREBASE_CONFIG);
     db = firebase.firestore();
+    // Офлайн-кеш базы: прогресс открывается и сохраняется без интернета, потом синхронизируется.
+    db.enablePersistence({ synchronizeTabs: true }).catch(() => {});
   }
   const docKey = n => n.trim().toLowerCase().replace(/[\/.#$\[\]]/g, "_");
   async function openProfile(n) {
@@ -192,13 +194,51 @@
     if (c) c.onclick = () => m.remove();
   }
 
+  // ── Тема и состояние экрана ──
+  const MOON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/></svg>';
+  const SUN = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>';
+  const CHEV = '<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>';
+  function isDark() {
+    const t = document.documentElement.getAttribute("data-theme");
+    return t ? t === "dark" : !!(window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches);
+  }
+  function paintThemeColor() {
+    const m = document.querySelector('meta[name="theme-color"]');
+    if (m) m.content = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();
+  }
+  function toggleTheme() {
+    const t = isDark() ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", t);
+    try { localStorage.setItem("kalimat.theme", t); } catch (e) {}
+    paintThemeColor();
+    const b = document.getElementById("theme");
+    if (b) { b.innerHTML = isDark() ? SUN : MOON; b.setAttribute("aria-label", isDark() ? "Светлая тема" : "Тёмная тема"); }
+  }
+  paintThemeColor();
+
+  // Какие недели развёрнуты. По умолчанию открыта только последняя.
+  const UI_KEY = "kalimat.ui";
+  let ui = {};
+  try { ui = JSON.parse(localStorage.getItem(UI_KEY)) || {}; } catch (e) {}
+  ui.open = ui.open || {};
+  const saveUi = () => { try { localStorage.setItem(UI_KEY, JSON.stringify(ui)); } catch (e) {} };
+  const isOpen = key => key in ui.open ? ui.open[key] : key === "w" + weeks[weeks.length - 1];
+
   function topBar() {
     return `<div class="top">
-      <div class="brand"><span class="ar">كَلِمَات</span><h1>Калимат</h1></div>
-      <button class="chip" id="prof">👤 ${esc(store.current)}</button>
+      <div class="brand"><h1>калимат</h1><span class="ar">كَلِمَات</span></div>
+      <div class="tools">
+        <button class="tbtn" id="hacks">Лайфхаки</button>
+        <button class="ibtn" id="theme" aria-label="${isDark() ? "Светлая тема" : "Тёмная тема"}">${isDark() ? SUN : MOON}</button>
+        <button class="ibtn me" id="prof" aria-label="Профиль: ${esc(store.current)}" title="${esc(store.current)}">${esc(store.current.trim().charAt(0).toUpperCase())}</button>
+      </div>
     </div>`;
   }
-  function bindTop() { const p = document.getElementById("prof"); if (p) p.onclick = () => profileModal(false); }
+  function bindTop() {
+    on("prof", () => profileModal(false));
+    on("theme", toggleTheme);
+    on("hacks", hacks);
+  }
 
   // ── Общая таблица ──
   function loadBoard() {
@@ -232,71 +272,71 @@
     WORDS.forEach(w => { const k = dayKey(w); let g = groups.find(x => x.k === k); if (!g) groups.push(g = { k, week: w.week, day: w.day, ids: [] }); g.ids.push(w.id); });
     const fresh = groups.find(g => g.ids.some(id => !me().words[id]));
     const tests = me().tests || [];
+    const mins = Math.max(1, Math.ceil(Math.min(due.length, REVIEW_LIMIT) / 3));
 
     app.innerHTML = `<div class="wrap">
       ${topBar()}
 
-      <section class="panel due">
-        <span class="label">Повторение на сегодня</span>
+      <section class="sec">
+        <span class="label">Повторить сегодня</span>
         ${due.length ? `
-          <div class="bignum">${due.length}</div>
-          <p>${plural(due.length, "слово ждёт", "слова ждут", "слов ждут")} повторения. ${due.length > REVIEW_LIMIT ? `За раз — ${REVIEW_LIMIT}, остальные завтра.` : "Это 2–3 минуты."}</p>
-          <button class="btn block" id="review">Повторить</button>` : `
-          <h2>Всё повторено</h2>
-          <p>${nd ? "Следующий повтор: " + inDays(nd) + "." : "Отметь выученные слова, и они появятся здесь в нужный день."}</p>`}
+          <div class="hero-num">${due.length}<small>${plural(due.length, "слово", "слова", "слов").replace(/^\d+ /, "")} · ${plural(mins, "минута", "минуты", "минут")}</small></div>
+          ${due.length > REVIEW_LIMIT ? `<p class="muted small">За раз — ${REVIEW_LIMIT}, остальные завтра.</p>` : ""}
+          <button class="btn" id="review">Начать</button>` : `
+          <h2 class="head">Всё повторено</h2>
+          <p class="muted">${nd ? "Следующий повтор: " + inDays(nd) + "." : "Выучи новые слова, и они появятся здесь в нужный день."}</p>`}
       </section>
 
-      <section class="panel">
-        <span class="label">Новые слова</span>
-        ${fresh ? `
-          <h2>Неделя ${fresh.week}, день ${fresh.day}</h2>
-          <div class="day-words" style="justify-content:flex-start">${fresh.ids.map(id => `<button class="wchip" data-word="${id}">${byId[id].ar}</button>`).join("")}</div>
-          <button class="btn block" id="learn" data-k="${fresh.k}">Учить</button>` : `
-          <h2>Новых слов пока нет</h2>
-          <p class="muted">Когда пришлёшь новые 3 слова, они появятся здесь.</p>`}
-      </section>
-
-      ${bigTestsPanel(tests)}
-
-      ${weeks.slice().reverse().map(wk => weekPanel(wk, groups.filter(g => g.week === wk), tests)).join("")}
-
-      <div class="legend">
-        <span><i class="dot"></i>не начато</span>
-        <span><i class="dot s1"></i>учу</span>
-        <span><i class="dot s3"></i>закрепляю</span>
-        <span><i class="dot s5"></i>выучено надолго</span>
-        <span><i class="dot lapse"></i>забыл, повторю</span>
-      </div>
-
-      ${PATTERNS.length ? `<section class="panel">
-        <span class="label">Закономерности</span>
-        <p class="muted small">Одна модель — один смысл. Узнал модель, и новое слово угадывается наполовину.</p>
-        ${PATTERNS.map(p => `<div class="phr"><span class="ar">${p.wazn}</span><span>${esc(p.meaning)}<br><span class="ar">${p.ids.map(id => byId[id] ? byId[id].ar : "").join("، ")}</span></span></div>`).join("")}
+      ${fresh ? `<section class="sec">
+        <span class="label">Новые слова · неделя ${fresh.week}, день ${fresh.day}</span>
+        <div class="ws">${fresh.ids.map(id => `<button class="w ar" data-word="${id}">${byId[id].ar}</button>`).join("")}</div>
+        <button class="btn" id="learn" data-k="${fresh.k}">Учить</button>
       </section>` : ""}
 
-      ${CLOUD ? `<section class="panel"><span class="label">Общая таблица</span><div id="board"><p class="muted">Загружаю…</p></div></section>` : ""}
+      <div class="weeks">
+        ${weeks.slice().reverse().map(wk => weekBlock(wk, groups.filter(g => g.week === wk), tests)).join("")}
+        <div class="legend">
+          <span><i class="dot"></i>не начато</span>
+          <span><i class="dot s1"></i>учу</span>
+          <span><i class="dot s3"></i>закрепляю</span>
+          <span><i class="dot s5"></i>надолго</span>
+          <span><i class="dot lapse"></i>забыл</span>
+        </div>
+      </div>
 
-      <section class="panel">
-        <span class="label">Мои результаты</span>
-        ${tests.length ? tests.slice().reverse().map(t => `<div class="hist"><span>Зачёт, ${esc(testName(t))} · ${fmtDay(t.date)}</span><strong>${t.correct}/${t.total} · ${pct(t.correct, t.total)}%</strong></div>`).join("") : `<p class="muted">Здесь появятся результаты зачётов.</p>`}
-        ${CLOUD ? "" : `<div class="row"><button class="btn ghost" id="backup">Резервная копия</button></div>`}
+      <section class="sec">
+        <span class="label">Зачёты</span>
+        ${bigTests().reverse().map(({ kind, n }) => testRow(kind, n, tests)).join("")}
+        ${weeks.slice().reverse().map(wk => testRow("week", wk, tests)).join("")}
+        ${bigTests().length ? "" : `<p class="muted small">Месячный зачёт по 4 неделям откроется после недели ${Math.ceil(((weeks[weeks.length - 1] || 0) + 1) / 4) * 4}, зачёт за 3 месяца — после недели 12.</p>`}
+        ${CLOUD ? "" : `<button class="btn ghost sm" id="backup">Резервная копия</button>`}
       </section>
+
+      ${CLOUD ? `<div class="week" data-open="${isOpen("board")}">
+        <div class="wk-head"><button class="wk-toggle" data-fold="board" aria-expanded="${isOpen("board")}">${CHEV}<span><h3>Общая таблица</h3></span></button></div>
+        <div class="wk-body" id="board"><p class="muted">Загружаю…</p></div>
+      </div>` : ""}
     </div>`;
 
     bindTop();
     on("review", () => startReview());
     on("learn", e => learnDay(e.currentTarget.dataset.k));
     on("backup", backupModal);
-    loadBoard();
-    app.querySelectorAll("[data-test]").forEach(b => b.onclick = () => startTest("week", +b.dataset.test));
-    app.querySelectorAll("[data-bigtest]").forEach(b => b.onclick = () => { const [k, n] = b.dataset.bigtest.split(":"); startTest(k, +n); });
+    if (isOpen("board")) loadBoard();
+    app.querySelectorAll("[data-test]").forEach(b => b.onclick = () => { const [k, n] = b.dataset.test.split(":"); startTest(k, +n); });
+    app.querySelectorAll("[data-fold]").forEach(b => b.onclick = () => {
+      const key = b.dataset.fold, box = b.closest(".week"), open = !isOpen(key);
+      ui.open[key] = open; saveUi();
+      box.dataset.open = open; b.setAttribute("aria-expanded", open);
+      if (key === "board" && open) loadBoard();
+    });
     app.querySelectorAll("[data-markweek]").forEach(b => b.onclick = () => {
       WORDS.filter(w => w.week === +b.dataset.markweek && !me().words[w.id]).forEach(w => { learn(w.id, 1); me().words[w.id].due = today() + 1; });
       save(); home();
     });
     window.scrollTo(0, 0);
   }
-  function topBarEmpty() { return `<div class="top"><div class="brand"><span class="ar">كَلِمَات</span><h1>Калимат</h1></div></div>`; }
+  function topBarEmpty() { return `<div class="top"><div class="brand"><h1>калимат</h1><span class="ar">كَلِمَات</span></div></div>`; }
   const on = (id, fn) => { const el = document.getElementById(id); if (el) el.onclick = fn; };
   const pct = (a, b) => b ? Math.round(a / b * 100) : 0;
   function plural(n, one, few, many) {
@@ -325,34 +365,57 @@
     });
     return list;
   }
-  function bigTestsPanel(tests) {
-    const list = bigTests();
-    const lastWk = weeks.length ? weeks[weeks.length - 1] : 0;
-    const nextMonth = Math.ceil((lastWk + 1) / 4) * 4;
-    return `<section class="panel">
-      <span class="label">Большие зачёты</span>
-      ${list.length ? list.reverse().map(({ kind, n }) => {
-        const best = bestScore(tests, kind, n);
-        const ws = testWeeks(kind, n);
-        return `<div class="hist"><span>Зачёт, ${esc(TEST_KINDS[kind].name(n))} <span class="muted small">· недели ${ws[0]}–${ws[ws.length - 1]}${best >= 0 ? " · лучший " + best + "%" : ""}</span></span>
-          <button class="btn ${best >= 0 ? "ghost" : ""}" data-bigtest="${kind}:${n}">${best >= 0 ? "Пересдать" : "Сдать"}</button></div>`;
-      }).join("") : `<p class="muted small">Месячный зачёт по 4 неделям откроется после недели ${nextMonth}, зачёт за 3 месяца — после недели 12.</p>`}
-    </section>`;
-  }
 
-  function weekPanel(wk, groups, tests) {
+  function weekBlock(wk, groups, tests) {
     const ids = groups.flatMap(g => g.ids);
     const learned = ids.filter(id => me().words[id]).length;
+    const done = tests.filter(t => testKind(t) === "week" && testNum(t) === wk);
     const best = bestScore(tests, "week", wk);
-    return `<section class="panel">
-      <div class="top"><h2>Неделя ${wk}</h2><span class="muted small">${learned} из ${ids.length} начато${best >= 0 ? " · лучший зачёт " + best + "%" : ""}</span></div>
-      <div>${groups.map(g => `<div class="day"><span class="day-n">День ${g.day}</span>
-        <div class="day-words">${g.ids.map(id => `<button class="wchip" data-word="${id}"><i class="${dotClass(id)}"></i>${byId[id].ar}</button>`).join("")}</div></div>`).join("")}</div>
-      <div class="row">
-        <button class="btn ${best >= 0 ? "ghost" : ""}" data-test="${wk}">${best >= 0 ? "Пересдать зачёт" : "Зачёт недели " + wk}</button>
-        ${learned < ids.length ? `<button class="btn ghost" data-markweek="${wk}">Я уже знаю эти слова</button>` : ""}
+    const key = "w" + wk;
+    return `<div class="week" data-open="${isOpen(key)}">
+      <div class="wk-head">
+        <button class="wk-toggle" data-fold="${key}" aria-expanded="${isOpen(key)}">${CHEV}<span><h3>Неделя ${wk}</h3>
+          <span class="wk-meta">${learned} из ${ids.length}${best >= 0 ? ` · зачёт <b>${best}%</b>` : ""}</span></span></button>
+        <button class="btn line sm" data-test="week:${wk}">${done.length ? "Пересдать" : "Зачёт"}</button>
       </div>
-    </section>`;
+      <div class="wk-body">
+        ${groups.map(g => `<div class="wk-day"><span class="dn">${g.day}</span>
+          <div class="ws">${g.ids.map(id => `<button class="w ar" data-word="${id}"><i class="${dotClass(id)}"></i>${byId[id].ar}</button>`).join("")}</div></div>`).join("")}
+        ${learned < ids.length ? `<button class="btn ghost sm" data-markweek="${wk}">Я уже знаю эти слова</button>` : ""}
+      </div>
+    </div>`;
+  }
+
+  function testRow(kind, n, tests) {
+    const done = tests.filter(t => testKind(t) === kind && testNum(t) === n);
+    const best = bestScore(tests, kind, n);
+    const last = done[done.length - 1];
+    const ws = testWeeks(kind, n);
+    const name = TEST_KINDS[kind].name(n);
+    return `<div class="trow">
+      <span>${esc(name[0].toUpperCase() + name.slice(1))}${kind === "week" ? "" : ` <span class="muted small">· недели ${ws[0]}–${ws[ws.length - 1]}</span>`}<span class="when">${last ? fmtDay(last.date) + " · " + plural(done.length, "попытка", "попытки", "попыток") : "ещё не сдан"}</span></span>
+      <span class="pct">${best >= 0 ? best + "%" : "—"}</span>
+      <button class="btn line sm" data-test="${kind}:${n}">${done.length ? "Пересдать" : "Сдать"}</button>
+    </div>`;
+  }
+
+  // ── Лайфхаки ──
+  function hacks() {
+    currentBack = hacks;
+    app.innerHTML = `<div class="wrap">
+      <div class="top"><button class="tbtn" id="back">← На главную</button></div>
+      <section class="sec">
+        <span class="label">Лайфхаки · закономерности</span>
+        <p class="muted">Одна модель слова — один смысл. Узнал модель, и новое слово наполовину понятно.</p>
+      </section>
+      ${PATTERNS.map(p => `<section class="hack">
+        <span class="wz ar">${p.wazn}</span>
+        <strong>${esc(p.meaning)}</strong>
+        <div class="ws" style="justify-content:flex-start">${p.ids.filter(id => byId[id]).map(id => `<button class="w ar" data-word="${id}">${byId[id].ar}</button>`).join("")}</div>
+      </section>`).join("") || `<p class="muted">Пока пусто.</p>`}
+    </div>`;
+    on("back", home);
+    window.scrollTo(0, 0);
   }
 
   // ── Карточка слова ──
@@ -717,6 +780,10 @@
       } catch (e) { msg.textContent = "Текст не похож на резервную копию. Вставь его целиком."; }
     };
     m.querySelector("#bclose").onclick = () => m.remove();
+  }
+
+  if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
+    navigator.serviceWorker.register("sw.js").catch(() => {});
   }
 
   if (CLOUD && store.current) openProfile(store.current); else home();
