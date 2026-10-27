@@ -1,0 +1,24 @@
+# Downloads word photos from Wikimedia Commons into the repo, so the site
+# serves them itself (works offline and never breaks on a hotlink).
+name: Fetch photos
+on:
+  workflow_dispatch:
+  push:
+    paths: ["tools/photo-candidates.txt", "tools/photos.txt"]
+permissions:
+  contents: write
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download
+        run: |
+          if [ -f tools/photos.txt ]; then tools/fetch-photos.sh tools/photos.txt photos; fi
+          if [ -f tools/photo-candidates.txt ]; then tools/fetch-photos.sh tools/photo-candidates.txt photo-candidates; fi
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A photos photo-candidates 2>/dev/null || true
+          git diff --cached --quiet || (git commit -m "Скачать фото слов" && git push)
