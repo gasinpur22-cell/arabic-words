@@ -5,6 +5,10 @@
   const PATTERNS = window.PATTERNS || [];
   const byId = Object.fromEntries(WORDS.map(w => [w.id, w]));
   const weeks = [...new Set(WORDS.map(w => w.week))].sort((a, b) => a - b);
+  // Неделя целиком — когда в словаре есть все её 7 дней. Пока слова добавляются по дню,
+  // недоделанная неделя не считается пройденной и зачёт по ней не предлагается.
+  const DAYS_IN_WEEK = 7;
+  const fullWeeks = weeks.filter(wk => new Set(WORDS.filter(w => w.week === wk).map(w => w.day)).size >= DAYS_IN_WEEK);
 
   // Интервальные повторы: после изучения — через 2 дня, затем 5 (недельный зачёт),
   // 14 дней, 30 дней (месячный зачёт), 90 дней (зачёт за 3 месяца), дальше раз в полгода.
@@ -249,9 +253,9 @@
   // Зачёт показывается на главной только в свой день: когда все слова его недель пройдены, а сдачи ещё не было.
   function pendingTest() {
     const tests = me().tests || [];
-    const ready = wks => wks.every(wk => weeks.includes(wk)) && WORDS.filter(w => wks.includes(w.week)).every(w => me().words[w.id]);
+    const ready = wks => wks.every(wk => fullWeeks.includes(wk)) && WORDS.filter(w => wks.includes(w.week)).every(w => me().words[w.id]);
     for (const kind of ["quarter", "month", "week"]) {
-      for (let n = 1; n * TEST_KINDS[kind].weeks <= (weeks[weeks.length - 1] || 0); n++) {
+      for (let n = 1; n * TEST_KINDS[kind].weeks <= (fullWeeks[fullWeeks.length - 1] || 0); n++) {
         if (ready(testWeeks(kind, n)) && bestScore(tests, kind, n) < 0) return { kind, n };
       }
     }
@@ -878,7 +882,7 @@
       // Свою строку берём из памяти: запись в базу уходит с небольшой задержкой.
       const rows = snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(r => r.id !== uid);
       if (me()) rows.push({ id: uid, ...me() });
-      const wk = weeks[weeks.length - 1];
+      const wk = fullWeeks[fullWeeks.length - 1] || weeks[0];
       const count = r => Object.keys(r.words || {}).length;
       rows.sort((a, b) => count(b) - count(a) || streakOf(b.days) - streakOf(a.days));
       el.innerHTML = `<table class="board">
