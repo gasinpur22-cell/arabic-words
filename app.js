@@ -642,12 +642,15 @@
     }
     draw();
   }
+  // В заданиях с вариантами верный ответ уже подсвечен зелёным, повторять его не нужно: так «Дальше» помещается на экран.
   function wrongBox(t) {
     const w = byId[t.id];
+    const cont = `<button class="btn press" data-act="cont">Дальше</button>`;
+    if (["ar2ru", "ru2ar", "cloze"].includes(t.type)) return cont;
     const answer = t.type === "cloze"
       ? `<span class="ar">${w.cloze.ar.replace("___", w.ar)}</span><span>${esc(w.cloze.ru)}</span>`
       : `<span><span class="ar">${w.ar}</span> · ${esc(w.ru)}</span>`;
-    return `<div class="fb no"><b>Правильный ответ</b>${answer}</div><button class="btn press" data-act="cont">Дальше</button>`;
+    return `<div class="fb no"><b>Правильный ответ</b>${answer}</div>${cont}`;
   }
 
   // Каждое задание: html(t) рисует, acts(t, done, redraw, push) даёт обработчики кнопок.
@@ -697,8 +700,8 @@
         const res = t.fb === "ok" ? " right" : t.fb === "no" ? " wrong" : "";
         return `<div class="tile q"><span class="qr">${esc(w.ru)}</span><span class="muted small">собери слово по-арабски</span></div>
           <div class="slot${built ? "" : " empty"}${res}" aria-live="polite">${built || "нажимай буквы по порядку"}</div>
-          <div class="letters">${t.tiles.map((c, k) => `<button class="tile press${t.got.includes(k) ? " used" : ""}" data-act="let" data-k="${k}" ${t.fb ? "disabled" : ""}>${c}</button>`).join("")}</div>
-          ${t.fb ? "" : `<div class="row2"><button class="btn ghost press" data-act="erase" ${t.got.length ? "" : "disabled"}>Стереть</button><button class="btn press" data-act="check" ${t.got.length ? "" : "disabled"}>Проверить</button></div>`}`;
+          ${t.fb ? "" : `<div class="letters">${t.tiles.map((c, k) => `<button class="tile press${t.got.includes(k) ? " used" : ""}" data-act="let" data-k="${k}" >${c}</button>`).join("")}</div>
+          <div class="row2"><button class="btn ghost press" data-act="erase" ${t.got.length ? "" : "disabled"}>Стереть</button><button class="btn press" data-act="check" ${t.got.length ? "" : "disabled"}>Проверить</button></div>`}`;
       },
       acts: (t, done, redraw) => ({
         let: b => { t.got.push(+b.dataset.k); redraw(); },
@@ -734,10 +737,13 @@
           const cls = ["tile", "mt", "press", side === "ar" ? "ar" : "", n ? "linked" : "", t.sel && t.sel.side === side && t.sel.id === id ? "pick" : ""].join(" ") + res;
           return `<button class="${cls}" data-act="m" data-side="${side}" data-id="${id}" ${t.checked ? "disabled" : ""}>${n && !t.checked ? `<span class="tag">${n}</span>` : ""}${side === "ar" ? byId[id].ar : esc(byId[id].ru)}</button>`;
         };
-        const cells = t.cols.ru.map((id, k) => tile("ru", id) + tile("ar", t.cols.ar[k])).join("");
+        // После проверки плитки встают верными парами: зелёные ты соединил правильно, красные — нет.
+        const cells = t.checked
+          ? t.ids.map(id => tile("ru", id).replace(/ (right|wrong)"/, t.links[id] === id ? ' right"' : ' wrong"') + tile("ar", id).replace(/ (right|wrong)"/, t.links[id] === id ? ' right"' : ' wrong"')).join("")
+          : t.cols.ru.map((id, k) => tile("ru", id) + tile("ar", t.cols.ar[k])).join("");
         const bad = t.checked ? t.ids.filter(id => t.links[id] !== id) : [];
         return `<div class="match">${cells}</div>
-          ${t.checked ? `<div class="fb ${bad.length ? "no" : "ok"}"><b>${bad.length ? "Ошибок: " + bad.length : "Все пары верные"}</b>${bad.map(id => `<span><span class="ar">${byId[id].ar}</span> · ${esc(byId[id].ru)}</span>`).join("")}</div>
+          ${t.checked ? `<p class="small center ${bad.length ? "bad-ink" : "good-ink"}"><b>${bad.length ? "Ошибок: " + bad.length + ". Вот верные пары" : "Все пары верные"}</b></p>
             <button class="btn press" data-act="cont">Дальше</button>`
           : `<p class="muted small center">${order.length} из ${t.ids.length} соединено. Нажми на пару ещё раз, чтобы разъединить</p>`}`;
       },
