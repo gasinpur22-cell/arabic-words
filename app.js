@@ -393,7 +393,7 @@
     ].join("");
   }
   const photo = w => w.photo && w.photo.src
-    ? `<img src="${esc(w.photo.src)}" alt="${esc(w.ru)}" decoding="async"><span class="cap">Фото: ${esc(w.photo.credit)}</span>` : "";
+    ? `<img src="${esc(w.photo.src)}" alt="${esc(w.ru)}" decoding="async">${w.photo.credit ? `<span class="cap">Фото: ${esc(w.photo.credit)}</span>` : ""}` : "";
 
   function showWord(id, back) {
     const w = byId[id]; if (!w) return;
